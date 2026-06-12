@@ -1,65 +1,126 @@
-import Image from "next/image";
+"use client";
+
+import { useState } from "react";
 
 export default function Home() {
+  const [messages, setMessages] = useState<{ role: string; content: string }[]>([]);
+  const [input, setInput] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!input.trim() || isLoading) return;
+
+    const userMessage = { role: "user", content: input };
+    setMessages((prev) => [...prev, userMessage]);
+    setInput("");
+    setIsLoading(true);
+
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: [...messages, userMessage] }),
+      });
+
+      if (!response.ok) throw new Error("Error en la API");
+
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+      let assistantContent = "";
+
+      // Añadimos el mensaje del modelo vacío para ir llenándolo con el streaming
+      setMessages((prev) => [...prev, { role: "model", content: "" }]);
+
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          
+          const text = decoder.decode(value, { stream: true });
+          assistantContent += text;
+
+          setMessages((prev) => {
+            const updated = [...prev];
+            updated[updated.length - 1] = { role: "model", content: assistantContent };
+            return updated;
+          });
+        }
+      }
+    } catch (error) {
+      console.error(error);
+      setMessages((prev) => [...prev, { role: "model", content: "Error al conectar con MaxiQueen AI." }]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
+    <main className="flex min-h-screen flex-col items-center justify-between bg-[#09090b] text-white font-sans p-4 relative">
+      {/* Fondo Cyberpunk */}
+      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-purple-950/30 via-zinc-950 to-black z-0" />
+
+      {/* Cabecera */}
+      <header className="z-10 w-full max-w-2xl text-center py-6 border-b border-purple-500/20 backdrop-blur-md">
+        <h1 className="text-3xl font-extrabold tracking-wider bg-clip-text text-transparent bg-gradient-to-r from-purple-400 via-pink-500 to-cyan-400 drop-shadow-[0_0_10px_rgba(168,85,247,0.4)]">
+          MAXIQUEEN OS
+        </h1>
+        <p className="text-zinc-500 text-xs uppercase tracking-widest mt-1">
+          E-Commerce Automation Engine
+        </p>
+      </header>
+
+      {/* Caja de Mensajes */}
+      <section className="z-10 flex-1 w-full max-w-2xl my-4 overflow-y-auto p-4 rounded-xl border border-zinc-800 bg-black/40 backdrop-blur-md flex flex-col gap-4 max-h-[60vh]">
+        {messages.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full text-zinc-500 text-center p-8 space-y-2">
+            <p className="text-sm uppercase tracking-wider text-purple-400">Sistema Activo</p>
+            <p className="text-xs max-w-xs">Pregúntame sobre la tienda de ropa, zapatos o las automatizaciones de MaxiQueen.</p>
+          </div>
+        ) : (
+          messages.map((msg, idx) => (
+            <div
+              key={idx}
+              className={`flex flex-col max-w-[85%] p-3 rounded-xl border text-sm ${
+                msg.role === "user"
+                  ? "bg-purple-950/40 border-purple-500/30 self-end text-purple-100"
+                  : "bg-zinc-900/60 border-zinc-800 self-start text-zinc-200"
+              }`}
             >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+              <span className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1 font-bold">
+                {msg.role === "user" ? "Tú" : "MaxiQueen AI"}
+              </span>
+              <p className="whitespace-pre-wrap leading-relaxed">{msg.content}</p>
+            </div>
+          ))
+        )}
+        {isLoading && (
+          <div className="text-xs text-cyan-400 animate-pulse uppercase tracking-widest self-start bg-cyan-950/20 border border-cyan-500/20 px-3 py-1 rounded-full">
+            Procesando datos...
+          </div>
+        )}
+      </section>
+
+      {/* Formulario de Entrada */}
+      <footer className="z-10 w-full max-w-2xl pb-6">
+        <form onSubmit={handleSubmit} className="flex gap-2 w-full">
+          <input
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Escribe un mensaje al agente..."
+            className="flex-1 bg-zinc-900/80 border border-zinc-800 rounded-xl px-4 py-3 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-purple-500 transition-all"
+            disabled={isLoading}
+          />
+          <button
+            type="submit"
+            disabled={isLoading || !input.trim()}
+            className="bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 disabled:opacity-50 text-white font-bold px-6 py-3 rounded-xl text-sm transition-all shadow-[0_0_15px_rgba(168,85,247,0.3)] uppercase tracking-wider"
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+            Enviar
+          </button>
+        </form>
+      </footer>
+    </main>
   );
 }
