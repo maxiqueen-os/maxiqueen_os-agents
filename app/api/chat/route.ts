@@ -1,16 +1,17 @@
-import { groq } from '@ai-sdk/groq';
-import { streamText } from 'ai';
-
 export const runtime = 'edge';
-
 export async function POST(req: Request) {
   const { messages } = await req.json();
-
-  const result = await streamText({
-    model: groq('llama-3.1-8b-instant'),
-    system: 'Eres MaxiQueen AI, asistente de e-commerce de ropa y zapatos en Cúcuta, Colombia. Responde en español, corto y útil.',
-    messages,
+  const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: 'llama-3.1-8b-instant',
+      messages: [{role:'system',content:'Eres MaxiQueen AI. Responde en español, corto.'},...messages]
+    })
   });
-
-  return result.toTextStreamResponse();
+  const d = await r.json();
+  return new Response(d.choices?.[0]?.message?.content || 'Error');
 }
