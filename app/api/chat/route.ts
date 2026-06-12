@@ -1,21 +1,16 @@
+import { groq } from '@ai-sdk/groq';
+import { streamText } from 'ai';
+
 export const runtime = 'edge';
 
 export async function POST(req: Request) {
   const { messages } = await req.json();
-  const last = messages.at(-1)?.content?? "";
 
-  const text = `MAXIQUEEN OS online. Recibí: "${last}". Estoy listo para automatizar tu e-commerce.`;
-
-  const encoder = new TextEncoder();
-  const stream = new ReadableStream({
-    async start(controller) {
-      for (const c of text) {
-        controller.enqueue(encoder.encode(c));
-        await new Promise(r => setTimeout(r, 12));
-      }
-      controller.close();
-    }
+  const result = await streamText({
+    model: groq('llama-3.1-8b-instant'),
+    system: 'Eres MaxiQueen AI, asistente de e-commerce de ropa y zapatos en Cúcuta, Colombia. Responde en español, corto y útil.',
+    messages,
   });
 
-  return new Response(stream);
+  return result.toTextStreamResponse();
 }
