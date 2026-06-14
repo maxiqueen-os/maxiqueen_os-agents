@@ -5,11 +5,16 @@ type Msg = { role: "user" | "assistant"; content: string; imageUrl?: string };
 
 function cleanHistory(history: Msg[]) {
   return history
-   .filter(m =>!m.imageUrl)
-   .map(({ role, content }) => ({ role, content }))
-   .filter((m, i, arr) => i === 0 || m.content.trim()!== arr[i-1].content.trim())
-   .slice(-12);
+  .filter(m =>!m.imageUrl)
+  .map(({ role, content }) => ({ role, content }))
+  .filter((m, i, arr) => i === 0 || m.content.trim()!== arr[i-1].content.trim())
+  .slice(-12);
 }
+
+const fileToBase64 = (file: File) => new Promise<string>((res, rej) => {
+  const r = new FileReader(); r.onload = () => res(r.result as string);
+  r.onerror = rej; r.readAsDataURL(file);
+});
 
 async function fileToImageDataUrl(file: File): Promise<string> {
   const img = new Image();
@@ -36,6 +41,7 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [pendingImage, setPendingImage] = useState<string | null>(null);
+  const [pendingFileData, setPendingFileData] = useState<{name:string, mime:string, dataUrl:string} | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -63,18 +69,15 @@ export default function Home() {
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    if (f.size > 10 * 1024 * 1024) {
-      alert("Máx 10MB");
-      if (fileInputRef.current) fileInputRef.current.value = "";
-      return;
-    }
+    const f = e.target.files?.[0]; if (!f) return;
+    if (f.size > 10 * 1024) { alert("Máx 10MB"); e.target.value = ""; return; }
     setPendingFile(f);
     if (f.type.startsWith("image/")) {
       setPendingImage(await fileToImageDataUrl(f));
+      setPendingFileData(null);
     } else {
       setPendingImage(null);
+      setPendingFileData({ name: f.name, mime: f.type, dataUrl: await fileToBase64(f) });
     }
   };
 
@@ -82,16 +85,12 @@ export default function Home() {
     e.preventDefault();
     if ((!input.trim() &&!pendingFile) || isLoading) return;
 
-    let userText = input.trim();
+    const userText = input.trim();
     const isImage = pendingImage!== null;
-
-    if (pendingFile &&!isImage) {
-      userText += (userText? "\n\n" : "") + `[Archivo adjunto: ${pendingFile.name} ${(pendingFile.size/1024/1024).toFixed(2)} MB]`;
-    }
 
     const userMsg: Msg = {
       role: "user",
-      content: userText || "Analiza esta imagen",
+      content: userText || (isImage? "Analiza esta imagen" : "Analiza este archivo"),
       imageUrl: pendingImage || undefined
     };
 
@@ -100,6 +99,8 @@ export default function Home() {
     setInput("");
     setPendingFile(null);
     setPendingImage(null);
+    const fileDataToSend = pendingFileData;
+    setPendingFileData(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
     setIsLoading(true);
 
@@ -111,6 +112,7 @@ export default function Home() {
         body: JSON.stringify({
           message: userMsg.content,
           imageDataUrl: userMsg.imageUrl || null,
+          fileData: isImage? null : fileDataToSend,
           history: historyForApi
         }),
       });
@@ -151,7 +153,7 @@ export default function Home() {
             key={idx}
             className={`flex flex-col max-w-[85%] p-3 rounded-xl border text-sm ${
               msg.role === "user"
-              ? "bg-purple-950/40 border-purple-500/30 self-end text-purple-100"
+             ? "bg-purple-950/40 border-purple-500/30 self-end text-purple-100"
                 : "bg-zinc-900/60 border-zinc-800 self-start text-zinc-200"
             }`}
           >
@@ -177,7 +179,7 @@ export default function Home() {
               {pendingImage && <img src={pendingImage} className="h-10 rounded border border-zinc-700" />}
               <span>📎 {pendingFile?.name} – {pendingFile? (pendingFile.size/1024/1024).toFixed(2) : ""} MB</span>
             </div>
-            <button onClick={() => { setPendingFile(null); setPendingImage(null); if(fileInputRef.current) fileInputRef.current.value = ""; }} className="text-zinc-500 hover:text-white">✕</button>
+            <button onClick={() => { setPendingFile(null); setPendingImage(null); setPendingFileData(null); if(fileInputRef.current) fileInputRef.current.value = ""; }} className="text-zinc-500 hover:text-white">✕</button>
           </div>
         )}
         <form onSubmit={handleSubmit} className="flex gap-2 w-full items-center">
