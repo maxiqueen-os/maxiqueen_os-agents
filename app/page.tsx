@@ -1,17 +1,13 @@
 "use client";
-
 import { useState, useRef, useEffect } from "react";
 
 type Msg = { role: "user" | "assistant"; content: string };
-
-const API_URL = process.env.NEXT_PUBLIC_MQ_API?? "https://backend-maxi-queen-os.vercel.app/chat-widget";
 
 export default function Home() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -24,59 +20,31 @@ export default function Home() {
     const userMsg: Msg = { role: "user", content: input.trim() };
     const newHistory = [...messages, userMsg];
 
-    setMessages(newHistory);
+    setMessages([...newHistory, { role: "assistant", content: "" }]);
     setInput("");
     setIsLoading(true);
-    abortRef.current?.abort();
-    abortRef.current = new AbortController();
-
-    // crea el bubble de assistant una sola vez
-    setMessages(h => [...h, { role: "assistant", content: "" }]);
 
     try {
-      const res = await fetch(API_URL, {
+      const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: newHistory }),
-        signal: abortRef.current.signal,
-        mode: "cors",
+        body: JSON.stringify({ message: userMsg.content, history: messages }),
       });
 
-      if (!res.ok) {
-        const txt = await res.text().catch(() => "");
-        throw new Error(`API ${res.status}: ${txt.slice(0,120)}`);
-      }
+      if (!res.ok) throw new Error(`API ${res.status}`);
+      const { reply } = await res.json();
 
-      if (!res.body) throw new Error("El backend no devolvió stream");
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let full = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        full += decoder.decode(value, { stream: true });
-
-        // soporta texto plano y SSE "data:..."
-        const chunk = full.replace(/data:\s*/g, "");
-        setMessages(prev => {
-          const copy = [...prev];
-          copy[copy.length - 1] = { role: "assistant", content: chunk };
-          return copy;
-        });
-      }
+      setMessages(prev => {
+        const copy = [...prev];
+        copy[copy.length - 1] = { role: "assistant", content: reply };
+        return copy;
+      });
     } catch (err: any) {
-      if (err.name!== "AbortError") {
-        setMessages(prev => {
-          const copy = [...prev];
-          copy[copy.length - 1] = {
-            role: "assistant",
-            content: `Error al conectar con MaxiQueen AI.\n${err.message}`
-          };
-          return copy;
-        });
-      }
+      setMessages(prev => {
+        const copy = [...prev];
+        copy[copy.length - 1] = { role: "assistant", content: `Error: ${err.message}` };
+        return copy;
+      });
     } finally {
       setIsLoading(false);
     }
@@ -85,7 +53,6 @@ export default function Home() {
   return (
     <main className="flex min-h-screen flex-col items-center justify-between bg-[#09090b] text-white font-sans p-4 relative">
       <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-purple-950/30 via-zinc-950 to-black z-0" />
-
       <header className="z-10 w-full max-w-2xl text-center py-6 border-b border-purple-500/20 backdrop-blur-md">
         <h1 className="text-3xl font-extrabold tracking-wider bg-clip-text text-transparent bg-gradient-to-r from-purple-400 via-pink-500 to-cyan-400">
           MAXIQUEEN OS
@@ -94,7 +61,6 @@ export default function Home() {
           E-Commerce Automation Engine
         </p>
       </header>
-
       <section className="z-10 flex-1 w-full max-w-2xl my-4 overflow-y-auto p-4 rounded-xl border border-zinc-800 bg-black/40 backdrop-blur-md flex flex-col gap-4 max-h-[60vh]">
         {messages.length === 0? (
           <div className="flex flex-col items-center justify-center h-full text-zinc-500 text-center p-8 space-y-2">
@@ -125,7 +91,6 @@ export default function Home() {
         )}
         <div ref={messagesEndRef} />
       </section>
-
       <footer className="z-10 w-full max-w-2xl pb-6">
         <form onSubmit={handleSubmit} className="flex gap-2 w-full">
           <input
