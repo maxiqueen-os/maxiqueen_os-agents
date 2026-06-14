@@ -2,14 +2,17 @@ import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
+// Cambia aquí el modelo. Recomendado: "llama-3.3-70b-versatile"
+const MODEL = "llama-3.3-70b-versatile";
+// const MODEL = "llama-3.1-8b-instant"; // rápido, menos preciso
+
 // --- MaxiQueen OS - System Prompt Internacional ---
 const MAXIQUEEN_SYSTEM = `Eres MaxiQueen AI, el agente de MaxiQueen OS.
 
-IDENTIDAD VERDADERA, NUNCA INVENTES OTRA:
-MaxiQueen OS es "Convierte tu caos digital en un sistema inteligente. MaxiQueen OS es el sistema digital humano que transforma ideas, historias y negocios en activos automatizados que generan ingresos reales."
-Es un E-Commerce Automation Engine. NO es una tienda para mujeres, NO es un OS de compras.
-Creador: César Julio Bedoya Barragán, ORCID: 0009-0004-4946-1374
-Módulos: Chat Core / ChatOS V2, Builder Chat, CRM Laboratorio, MaxiQueen Games
+Sobre ti:
+MaxiQueen OS - "Convierte tu caos digital en un sistema inteligente. Transforma ideas, historias y negocios en activos automatizados que generan ingresos reales."
+Es un E-Commerce Automation Engine global. Creador: César Julio Bedoya Barragán.
+Trabajas con Hotmart, Shopify, WooCommerce, Amazon, Mercado Libre.
 
 ALCANCE INTERNACIONAL:
 - Operas a nivel global. Hotmart, Shopify, WooCommerce, Mercado Libre, Amazon.
@@ -17,12 +20,15 @@ ALCANCE INTERNACIONAL:
 - Moneda: adapta a la del usuario. Si no especifica, usa USD. Soportas COP, USD, EUR, MXN, BRL, etc. Indica siempre la moneda.
 - E-commerce sin fronteras: funnels Hotmart, infoproductos, dropshipping, productos físicos, SaaS.
 
-REGLAS:
-1. Si te preguntan "qué es MaxiQueen OS", usa SOLO la identidad verdadera de arriba.
-2. Si no sabes algo de MaxiQueen OS, di "No tengo ese dato en el Core".
-3. Para CUALQUIER cálculo de margen, precio, comisión, ROAS: USA SIEMPRE la tool calcular_margen. Nunca calcules a mano.
-4. No alucines productos ni características.
-5. Sé conciso, útil para e-commerce internacional.
+Personalidad: claro, útil, creativo. Propones ideas, no repites plantillas.
+
+Reglas mínimas:
+- Si te preguntan qué es MaxiQueen OS, usa la descripción de arriba. No inventes otra identidad.
+- Responde en el idioma del usuario. Moneda por defecto USD.
+- Para cálculos de margen/precio/comisión usa siempre la tool calcular_margen.
+- Si no sabes un dato concreto de MaxiQueen OS, dilo con honestidad.
+
+Eres un chat libre. Propón, crea, itera.
 `;
 
 // --- Tool: calculadora de margen real ---
@@ -58,7 +64,7 @@ const tools = [{
       properties: {
         costo: { type: "number", description: "Costo unitario de compra" },
         precio_venta: { type: "number", description: "Precio de venta unitario" },
-        comision_porcentaje: { type: "number", description: "Comisión de la plataforma en %, ej 12 para Hotmart", default: 0 },
+        comision_porcentaje: { type: "number", description: "Comisión de la plataforma en %, ej 9.9 para Hotmart", default: 0 },
         unidades: { type: "number", description: "Unidades vendidas", default: 1 },
         moneda: { type: "string", description: "USD, COP, EUR, MXN, BRL...", default: "USD" }
       },
@@ -79,16 +85,16 @@ export async function POST(req: Request) {
       { role: "user", content: message }
     ];
 
-    // 1ª llamada a Groq con tools
+    // 1ª llamada con tools
     let res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({
-        model: "llama-3.1-8b-instant",
+        model: MODEL,
         messages,
         tools,
         tool_choice: "auto",
-        temperature: 0.3
+        temperature: 0.6
       })
     });
 
@@ -96,10 +102,9 @@ export async function POST(req: Request) {
     let data = await res.json();
     let choice = data.choices?.[0]?.message;
 
-    // Si el modelo pidió calcular_margen, ejecútala y haz 2ª llamada
+    // Tool calling
     if (choice?.tool_calls?.length) {
       messages.push(choice);
-
       for (const tc of choice.tool_calls) {
         if (tc.function.name === "calcular_margen") {
           const args = JSON.parse(tc.function.arguments || "{}");
@@ -111,15 +116,14 @@ export async function POST(req: Request) {
           });
         }
       }
-
-      // 2ª llamada con el resultado de la tool
+      // 2ª llamada con resultado de la tool
       res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({
-          model: "llama-3.1-8b-instant",
+          model: MODEL,
           messages,
-          temperature: 0.3
+          temperature: 0.6
         })
       });
       if (!res.ok) { const txt = await res.text(); return NextResponse.json({ reply: `Groq ${res.status}: ${txt}` }, { status: 500 }); }
