@@ -70,7 +70,8 @@ export default function Home() {
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0]; if (!f) return;
-    if (f.size > 10 * 1024) { alert("Máx 10MB"); e.target.value = ""; return; }
+    if (f.size > 10 * 1024 * 1024) { alert("Máx 10MB"); e.target.value = ""; return; }
+
     setPendingFile(f);
     if (f.type.startsWith("image/")) {
       setPendingImage(await fileToImageDataUrl(f));
