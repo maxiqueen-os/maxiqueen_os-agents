@@ -1,14 +1,31 @@
 "use client";
 import { useState, useRef, useEffect } from "react";
 
-type Msg = { role: "user" | "assistant"; content: string };
+type Msg = { role: "user" | "assistant"; content: string; imageUrl?: string };
 
 function cleanHistory(history: Msg[]) {
   return history
-   .filter(m => m.role === "user" || m.role === "assistant")
+   .filter(m =>!m.imageUrl)
    .map(({ role, content }) => ({ role, content }))
    .filter((m, i, arr) => i === 0 || m.content.trim()!== arr[i-1].content.trim())
    .slice(-12);
+}
+
+async function fileToImageDataUrl(file: File): Promise<string> {
+  const img = new Image();
+  const url = URL.createObjectURL(file);
+  await new Promise(r => { img.onload = r; img.src = url });
+  URL.revokeObjectURL(url);
+  const max = 1024;
+  let { width, height } = img;
+  if (width > max || height > max) {
+    const s = Math.min(max / width, max / height);
+    width *= s; height *= s;
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = width; canvas.height = height;
+  canvas.getContext("2d")!.drawImage(img, 0, 0, width, height);
+  return canvas.toDataURL("image/jpeg", 0.85);
 }
 
 export default function Home() {
@@ -17,7 +34,8 @@ export default function Home() {
   ]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [file, setFile] = useState<File | null>(null);
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [pendingImage, setPendingImage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -41,15 +59,10 @@ export default function Home() {
     window.speechSynthesis.speak(u);
   };
 
-  useEffect(() => {
-    if (typeof window!== "undefined") window.speechSynthesis.getVoices();
-  }, []);
+  useEffect(() => { if (typeof window!== "undefined") window.speechSynthesis.getVoices(); }, []);
+  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
-
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
     if (!f) return;
     if (f.size > 10 * 1024 * 1024) {
@@ -57,22 +70,36 @@ export default function Home() {
       if (fileInputRef.current) fileInputRef.current.value = "";
       return;
     }
-    setFile(f);
+    setPendingFile(f);
+    if (f.type.startsWith("image/")) {
+      setPendingImage(await fileToImageDataUrl(f));
+    } else {
+      setPendingImage(null);
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if ((!input.trim() &&!file) || isLoading) return;
+    if ((!input.trim() &&!pendingFile) || isLoading) return;
 
     let userText = input.trim();
-    if (file) userText += (userText? "\n\n" : "") + `[Archivo adjunto: ${file.name} ${(file.size/1024/1024).toFixed(2)} MB]`;
+    const isImage = pendingImage!== null;
 
-    const userMsg: Msg = { role: "user", content: userText };
+    if (pendingFile &&!isImage) {
+      userText += (userText? "\n\n" : "") + `[Archivo adjunto: ${pendingFile.name} ${(pendingFile.size/1024/1024).toFixed(2)} MB]`;
+    }
+
+    const userMsg: Msg = {
+      role: "user",
+      content: userText || "Analiza esta imagen",
+      imageUrl: pendingImage || undefined
+    };
+
     const newMessages = [...messages, userMsg];
-
     setMessages(newMessages);
     setInput("");
-    setFile(null);
+    setPendingFile(null);
+    setPendingImage(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
     setIsLoading(true);
 
@@ -81,7 +108,11 @@ export default function Home() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: userMsg.content, history: historyForApi }),
+        body: JSON.stringify({
+          message: userMsg.content,
+          imageDataUrl: userMsg.imageUrl || null,
+          history: historyForApi
+        }),
       });
       if (!res.ok) throw new Error(`API ${res.status}`);
       const { reply } = await res.json();
@@ -120,13 +151,16 @@ export default function Home() {
             key={idx}
             className={`flex flex-col max-w-[85%] p-3 rounded-xl border text-sm ${
               msg.role === "user"
-               ? "bg-purple-950/40 border-purple-500/30 self-end text-purple-100"
+              ? "bg-purple-950/40 border-purple-500/30 self-end text-purple-100"
                 : "bg-zinc-900/60 border-zinc-800 self-start text-zinc-200"
             }`}
           >
             <span className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1 font-bold">
               {msg.role === "user"? "Tú" : "MaxiQueen AI"}
             </span>
+            {msg.imageUrl && (
+              <img src={msg.imageUrl} className="rounded-lg mb-2 max-h-48 object-contain border border-zinc-700" />
+            )}
             <p className="whitespace-pre-wrap leading-relaxed">{msg.content}</p>
           </div>
         ))}
@@ -137,10 +171,13 @@ export default function Home() {
       </section>
 
       <footer className="z-10 w-full max-w-2xl pb-4 space-y-2">
-        {file && (
-          <div className="text-xs text-zinc-400 bg-zinc-900/60 border border-zinc-800 rounded-lg px-3 py-2 flex justify-between items-center">
-            <span>📎 {file.name} – {(file.size/1024/1024).toFixed(2)} MB</span>
-            <button onClick={() => { setFile(null); if(fileInputRef.current) fileInputRef.current.value = ""; }} className="text-zinc-500 hover:text-white">✕</button>
+        {(pendingFile || pendingImage) && (
+          <div className="text-xs text-zinc-400 bg-zinc-900/60 border border-zinc-800 rounded-lg px-3 py-2 flex justify-between items-center gap-3">
+            <div className="flex items-center gap-2">
+              {pendingImage && <img src={pendingImage} className="h-10 rounded border border-zinc-700" />}
+              <span>📎 {pendingFile?.name} – {pendingFile? (pendingFile.size/1024/1024).toFixed(2) : ""} MB</span>
+            </div>
+            <button onClick={() => { setPendingFile(null); setPendingImage(null); if(fileInputRef.current) fileInputRef.current.value = ""; }} className="text-zinc-500 hover:text-white">✕</button>
           </div>
         )}
         <form onSubmit={handleSubmit} className="flex gap-2 w-full items-center">
@@ -160,7 +197,7 @@ export default function Home() {
             className="flex-1 bg-zinc-900/80 border border-zinc-800 rounded-xl px-4 py-3 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-purple-500"
             disabled={isLoading}
           />
-          <button type="submit" disabled={isLoading || (!input.trim() &&!file)}
+          <button type="submit" disabled={isLoading || (!input.trim() &&!pendingFile)}
             className="bg-gradient-to-r from-purple-600 to-pink-600 disabled:opacity-50 text-white font-bold px-5 py-3 rounded-xl text-sm uppercase tracking-wider">
             Enviar
           </button>
