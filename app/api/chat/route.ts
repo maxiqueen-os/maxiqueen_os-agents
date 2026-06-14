@@ -74,24 +74,52 @@ const tools = [{
 
 export async function POST(req: Request) {
   try {
-    const { message, history = [], imageDataUrl = null } = await req.json();
+    // <-- NUEVO: fileData
+    const { message, history = [], imageDataUrl = null, fileData = null } = await req.json();
     const apiKey = process.env.GROQ_API_KEY;
     if (!apiKey) return NextResponse.json({ reply: "ERROR: Falta GROQ_API_KEY" }, { status: 500 });
+
+    // <-- NUEVO: parse PDF / Excel / Word
+    let fileText = "";
+    if (fileData &&!imageDataUrl) {
+      const base64 = (fileData.dataUrl as string).split(',')[1];
+      const buffer = Buffer.from(base64, 'base64');
+      const name = (fileData.name as string).toLowerCase();
+      try {
+        if (fileData.mime === "application/pdf" || name.endsWith(".pdf")) {
+          const pdf = (await import("pdf-parse")).default;
+          const parsed = await pdf(buffer);
+          fileText = parsed.text.slice(0, 12000);
+        } else if (fileData.mime.includes("spreadsheet") || name.endsWith(".xlsx") || name.endsWith(".xls")) {
+          const XLSX = await import("xlsx");
+          const wb = XLSX.read(buffer, { type: "buffer" });
+          fileText = wb.SheetNames.map(n => `### Hoja: ${n}\n` + XLSX.utils.sheet_to_csv(wb.Sheets[n])).join("\n\n").slice(0, 12000);
+        } else if (fileData.mime.includes("word") || name.endsWith(".docx")) {
+          const mammoth = await import("mammoth");
+          const result = await mammoth.extractRawText({ buffer });
+          fileText = result.value.slice(0, 12000);
+        }
+      } catch(e:any) { fileText = `[Error leyendo archivo: ${e.message}]`; }
+    }
+    const finalMessage = fileText
+     ? `${message || "Analiza este archivo"}\n\n--- CONTENIDO DE ${fileData?.name} ---\n${fileText}`
+      : message;
+    // <-- FIN NUEVO
 
     const hasImage =!!imageDataUrl;
     const model = hasImage? MODEL_VISION : MODEL_TEXT;
 
     // construye el mensaje de usuario, con imagen si hay
     const userContent: any = hasImage
-     ? [
-          { type: "text", text: message || "Analiza esta imagen para e-commerce" },
+    ? [
+          { type: "text", text: finalMessage || "Analiza esta imagen para e-commerce" },
           { type: "image_url", image_url: { url: imageDataUrl } }
         ]
-      : message;
+      : finalMessage;
 
     let messages: any[] = [
       { role: "system", content: MAXIQUEEN_SYSTEM },
-     ...history.filter((m: any) => typeof m.content === "string"),
+    ...history.filter((m: any) => typeof m.content === "string"),
       { role: "user", content: userContent }
     ];
 
