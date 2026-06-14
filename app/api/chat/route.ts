@@ -2,103 +2,112 @@ import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
-// Cambia aquí el modelo. Recomendado: "llama-3.3-70b-versatile"
 const MODEL = "llama-3.3-70b-versatile";
-// const MODEL = "llama-3.1-8b-instant"; // rápido, menos preciso
 
-// --- MaxiQueen OS - System Prompt Internacional ---
-const MAXIQUEEN_SYSTEM = `Eres MaxiQueen AI, el agente de MaxiQueen OS.
+// --- MaxiQueen OS - System Prompt Internacional v3 ---
+const MAXIQUEEN_SYSTEM = `Eres MaxiQueen AI, agente de MaxiQueen OS.
 
-Sobre ti:
-MaxiQueen OS - "Convierte tu caos digital en un sistema inteligente. Transforma ideas, historias y negocios en activos automatizados que generan ingresos reales."
-Es un E-Commerce Automation Engine global. Creador: César Julio Bedoya Barragán.
-Trabajas con Hotmart, Shopify, WooCommerce, Amazon, Mercado Libre.
+Identidad: MaxiQueen OS - "Convierte tu caos digital en un sistema inteligente. Transforma ideas, historias y negocios en activos automatizados que generan ingresos reales."
+E-Commerce Automation Engine global. Creador: César Julio Bedoya Barragán, ORCID: 0009-0004-4946-1374
 
-ALCANCE INTERNACIONAL:
-- Operas a nivel global. Hotmart, Shopify, WooCommerce, Mercado Libre, Amazon.
-- Responde en el idioma del usuario. Por defecto español neutro.
-- Moneda: adapta a la del usuario. Si no especifica, usa USD. Soportas COP, USD, EUR, MXN, BRL, etc. Indica siempre la moneda.
-- E-commerce sin fronteras: funnels Hotmart, infoproductos, dropshipping, productos físicos, SaaS.
+Tu catálogo, úsalo SIEMPRE que te pidan automatizar:
+- ChatOS V2: motor conversacional
+- Chat Builder: constructor visual de flujos WhatsApp/Instagram
+- CRM Laboratorio: clientes, pedidos, stock
+- Pasarela Hotmart: funnels internacionales USD/EUR/COP/MXN/BRL
 
-Personalidad: claro, útil, creativo. Propones ideas, no repites plantillas.
-
-Reglas mínimas:
-- Si te preguntan qué es MaxiQueen OS, usa la descripción de arriba. No inventes otra identidad.
-- Responde en el idioma del usuario. Moneda por defecto USD.
-- Para cálculos de margen/precio/comisión usa siempre la tool calcular_margen.
-- Si no sabes un dato concreto de MaxiQueen OS, dilo con honestidad.
+Reglas:
+1. Responde en el idioma del usuario. Moneda por defecto USD.
+2. Si preguntan qué es MaxiQueen OS, usa la identidad de arriba.
+3. Para cualquier cálculo de margen/precio/comisión usa SIEMPRE la tool calcular_margen.
+4. Cuando te pidan automatizar WhatsApp, e-commerce o CRM, ofrece TU catálogo: ChatOS / Chat Builder / CRM Laboratorio. No ofrezcas herramientas externas.
+5. Sé conciso. No repitas cálculos ya entregados en el turno anterior.
 
 Eres un chat libre. Propón, crea, itera.
 `;
 
-// --- Tool: calculadora de margen real ---
-function calcular_margen({ costo, precio_venta, comision_porcentaje = 0, unidades = 1, moneda = "USD" }: any) {
-  const ingreso_total = precio_venta * unidades;
-  const costo_total = costo * unidades;
-  const beneficio_bruto = ingreso_total - costo_total;
-  const comision_total = ingreso_total * (comision_porcentaje / 100);
-  const beneficio_neto = beneficio_bruto - comision_total;
-  const margen_bruto_pct = ingreso_total > 0? (beneficio_bruto / ingreso_total) * 100 : 0;
-  const margen_neto_pct = ingreso_total > 0? (beneficio_neto / ingreso_total) * 100 : 0;
-
-  return {
-    moneda,
-    unidades,
-    ingreso_total: Number(ingreso_total.toFixed(2)),
-    costo_total: Number(costo_total.toFixed(2)),
-    beneficio_bruto: Number(beneficio_bruto.toFixed(2)),
-    comision_total: Number(comision_total.toFixed(2)),
-    beneficio_neto: Number(beneficio_neto.toFixed(2)),
-    margen_bruto_pct: Number(margen_bruto_pct.toFixed(2)),
-    margen_neto_pct: Number(margen_neto_pct.toFixed(2)),
-  };
+// --- Tool: margen multi-moneda ---
+function calcular_margen({ items }: { items: Array<{costo: number, precio_venta: number, comision_porcentaje?: number, unidades?: number, moneda?: string}> }) {
+  const resultados = items.map(it => {
+    const unidades = it.unidades?? 1;
+    const comision = it.comision_porcentaje?? 0;
+    const moneda = it.moneda?? "USD";
+    const ingreso = it.precio_venta * unidades;
+    const costo_total = it.costo * unidades;
+    const beneficio_bruto = ingreso - costo_total;
+    const comision_total = ingreso * (comision / 100);
+    const beneficio_neto = beneficio_bruto - comision_total;
+    return {
+      moneda,
+      unidades,
+      ingreso_total: +ingreso.toFixed(2),
+      beneficio_neto: +beneficio_neto.toFixed(2),
+      margen_bruto_pct: +((beneficio_bruto / ingreso) * 100).toFixed(2),
+      margen_neto_pct: +((beneficio_neto / ingreso) * 100).toFixed(2),
+    };
+  });
+  return { resultados };
 }
 
 const tools = [{
   type: "function",
   function: {
     name: "calcular_margen",
-    description: "Calcula margen bruto/neto, beneficio y comisiones para e-commerce. Úsala SIEMPRE para precios, márgenes, ROAS.",
+    description: "Calcula márgenes para uno o varios productos, con distintas monedas. Úsala SIEMPRE para precios, márgenes, ROAS.",
     parameters: {
       type: "object",
       properties: {
-        costo: { type: "number", description: "Costo unitario de compra" },
-        precio_venta: { type: "number", description: "Precio de venta unitario" },
-        comision_porcentaje: { type: "number", description: "Comisión de la plataforma en %, ej 9.9 para Hotmart", default: 0 },
-        unidades: { type: "number", description: "Unidades vendidas", default: 1 },
-        moneda: { type: "string", description: "USD, COP, EUR, MXN, BRL...", default: "USD" }
+        items: {
+          type: "array",
+          description: "Lista de productos a calcular, uno por cada moneda/mercado",
+          items: {
+            type: "object",
+            properties: {
+              costo: { type: "number" },
+              precio_venta: { type: "number" },
+              comision_porcentaje: { type: "number" },
+              unidades: { type: "number" },
+              moneda: { type: "string", description: "USD, COP, EUR, MXN, BRL" }
+            },
+            required: ["costo", "precio_venta"]
+          }
+        }
       },
-      required: ["costo", "precio_venta"]
+      required: ["items"]
     }
   }
 }];
+
+function sanitizeHistory(history: any[]) {
+  // 1. quédate solo con los últimos 12 turnos
+  const recent = history.slice(-12);
+  // 2. elimina duplicados consecutivos exactos
+  return recent.filter((m, i, arr) =>
+    i === 0 || m.content!== arr[i-1]?.content
+  );
+}
 
 export async function POST(req: Request) {
   try {
     const { message, history = [] } = await req.json();
     const apiKey = process.env.GROQ_API_KEY;
-    if (!apiKey) return NextResponse.json({ reply: "ERROR: Falta GROQ_API_KEY en Vercel" }, { status: 500 });
+    if (!apiKey) return NextResponse.json({ reply: "ERROR: Falta GROQ_API_KEY" }, { status: 500 });
+
+    const cleanHistory = sanitizeHistory(history);
 
     let messages: any[] = [
       { role: "system", content: MAXIQUEEN_SYSTEM },
-     ...history,
+     ...cleanHistory,
       { role: "user", content: message }
     ];
 
-    // 1ª llamada con tools
+    // 1ª llamada
     let res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model: MODEL,
-        messages,
-        tools,
-        tool_choice: "auto",
-        temperature: 0.6
-      })
+      body: JSON.stringify({ model: MODEL, messages, tools, tool_choice: "auto", temperature: 0.6 })
     });
-
-    if (!res.ok) { const txt = await res.text(); return NextResponse.json({ reply: `Groq ${res.status}: ${txt}` }, { status: 500 }); }
+    if (!res.ok) return NextResponse.json({ reply: `Groq ${res.status}: ${await res.text()}` }, { status: 500 });
     let data = await res.json();
     let choice = data.choices?.[0]?.message;
 
@@ -107,33 +116,30 @@ export async function POST(req: Request) {
       messages.push(choice);
       for (const tc of choice.tool_calls) {
         if (tc.function.name === "calcular_margen") {
-          const args = JSON.parse(tc.function.arguments || "{}");
+          const args = JSON.parse(tc.function.arguments || '{"items":[]}');
           const result = calcular_margen(args);
-          messages.push({
-            role: "tool",
-            tool_call_id: tc.id,
-            content: JSON.stringify(result)
-          });
+          messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(result) });
         }
       }
-      // 2ª llamada con resultado de la tool
       res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({
-          model: MODEL,
-          messages,
-          temperature: 0.6
-        })
+        body: JSON.stringify({ model: MODEL, messages, temperature: 0.6 })
       });
-      if (!res.ok) { const txt = await res.text(); return NextResponse.json({ reply: `Groq ${res.status}: ${txt}` }, { status: 500 }); }
+      if (!res.ok) return NextResponse.json({ reply: `Groq ${res.status}: ${await res.text()}` }, { status: 500 });
       data = await res.json();
       choice = data.choices?.[0]?.message;
     }
 
-    const reply = choice?.content || "Sin respuesta de Groq";
-    return NextResponse.json({ reply });
+    let reply = choice?.content || "Sin respuesta";
 
+    // Anti-loop: si la respuesta es idéntica a la última del historial, córtala
+    const lastAssistant = [...cleanHistory].reverse().find(m => m.role === "assistant");
+    if (lastAssistant && reply.trim() === lastAssistant.content.trim()) {
+      reply = "¿Seguimos con la implementación en Chat Builder? Dime qué parte de WhatsApp quieres automatizar primero.";
+    }
+
+    return NextResponse.json({ reply });
   } catch (e: any) {
     return NextResponse.json({ reply: `Error servidor: ${e.message}` }, { status: 500 });
   }
