@@ -85,6 +85,7 @@ export async function POST(req: Request) {
       const name = (fileData.name as string).toLowerCase();
       try {
         if (fileData.mime === "application/pdf" || name.endsWith(".pdf")) {
+          // @ts-ignore - pdf-parse no tiene tipos para el subpath, funciona en runtime
           const pdfMod: any = await import("pdf-parse/lib/pdf-parse.js");
           const pdf = pdfMod.default || pdfMod;
           const parsed = await pdf(buffer);
@@ -103,14 +104,14 @@ export async function POST(req: Request) {
       } catch(e:any) { fileText = `[Error leyendo archivo: ${e.message}]`; }
     }
     const finalMessage = fileText
-    ? `${message || "Analiza este archivo"}\n\n--- CONTENIDO DE ${fileData?.name} ---\n${fileText}`
+   ? `${message || "Analiza este archivo"}\n\n--- CONTENIDO DE ${fileData?.name} ---\n${fileText}`
       : message;
 
     const hasImage =!!imageDataUrl;
     const model = hasImage? MODEL_VISION : MODEL_TEXT;
 
     const userContent: any = hasImage
-   ? [
+  ? [
           { type: "text", text: finalMessage || "Analiza esta imagen para e-commerce" },
           { type: "image_url", image_url: { url: imageDataUrl } }
         ]
@@ -118,7 +119,7 @@ export async function POST(req: Request) {
 
     let messages: any[] = [
       { role: "system", content: MAXIQUEEN_SYSTEM },
-   ...history.filter((m: any) => typeof m.content === "string"),
+  ...history.filter((m: any) => typeof m.content === "string"),
       { role: "user", content: userContent }
     ];
 
