@@ -74,12 +74,10 @@ const tools = [{
 
 export async function POST(req: Request) {
   try {
-    // <-- NUEVO: fileData
     const { message, history = [], imageDataUrl = null, fileData = null } = await req.json();
     const apiKey = process.env.GROQ_API_KEY;
     if (!apiKey) return NextResponse.json({ reply: "ERROR: Falta GROQ_API_KEY" }, { status: 500 });
 
-    // <-- NUEVO: parse PDF / Excel / Word
     let fileText = "";
     if (fileData &&!imageDataUrl) {
       const base64 = (fileData.dataUrl as string).split(',')[1];
@@ -87,31 +85,32 @@ export async function POST(req: Request) {
       const name = (fileData.name as string).toLowerCase();
       try {
         if (fileData.mime === "application/pdf" || name.endsWith(".pdf")) {
-          const pdf = (await import("pdf-parse")).default;
+          const pdfMod: any = await import("pdf-parse/lib/pdf-parse.js");
+          const pdf = pdfMod.default || pdfMod;
           const parsed = await pdf(buffer);
           fileText = parsed.text.slice(0, 12000);
         } else if (fileData.mime.includes("spreadsheet") || name.endsWith(".xlsx") || name.endsWith(".xls")) {
-          const XLSX = await import("xlsx");
+          const XLSXmod: any = await import("xlsx");
+          const XLSX = XLSXmod.default || XLSXmod;
           const wb = XLSX.read(buffer, { type: "buffer" });
-          fileText = wb.SheetNames.map(n => `### Hoja: ${n}\n` + XLSX.utils.sheet_to_csv(wb.Sheets[n])).join("\n\n").slice(0, 12000);
+          fileText = wb.SheetNames.map((n: string) => `### Hoja: ${n}\n` + XLSX.utils.sheet_to_csv(wb.Sheets[n])).join("\n\n").slice(0, 12000);
         } else if (fileData.mime.includes("word") || name.endsWith(".docx")) {
-          const mammoth = await import("mammoth");
+          const mammothMod: any = await import("mammoth");
+          const mammoth = mammothMod.default || mammothMod;
           const result = await mammoth.extractRawText({ buffer });
           fileText = result.value.slice(0, 12000);
         }
       } catch(e:any) { fileText = `[Error leyendo archivo: ${e.message}]`; }
     }
     const finalMessage = fileText
-     ? `${message || "Analiza este archivo"}\n\n--- CONTENIDO DE ${fileData?.name} ---\n${fileText}`
+    ? `${message || "Analiza este archivo"}\n\n--- CONTENIDO DE ${fileData?.name} ---\n${fileText}`
       : message;
-    // <-- FIN NUEVO
 
     const hasImage =!!imageDataUrl;
     const model = hasImage? MODEL_VISION : MODEL_TEXT;
 
-    // construye el mensaje de usuario, con imagen si hay
     const userContent: any = hasImage
-    ? [
+   ? [
           { type: "text", text: finalMessage || "Analiza esta imagen para e-commerce" },
           { type: "image_url", image_url: { url: imageDataUrl } }
         ]
@@ -119,7 +118,7 @@ export async function POST(req: Request) {
 
     let messages: any[] = [
       { role: "system", content: MAXIQUEEN_SYSTEM },
-    ...history.filter((m: any) => typeof m.content === "string"),
+   ...history.filter((m: any) => typeof m.content === "string"),
       { role: "user", content: userContent }
     ];
 
@@ -129,7 +128,6 @@ export async function POST(req: Request) {
       temperature: 0.6,
       max_tokens: 1024,
     };
-    // tools solo en modo texto
     if (!hasImage) {
       body.tools = tools;
       body.tool_choice = "auto";
@@ -145,7 +143,6 @@ export async function POST(req: Request) {
     let data = await res.json();
     let choice = data.choices?.[0]?.message;
 
-    // tool calling, solo en modo texto
     if (!hasImage && choice?.tool_calls?.length) {
       messages.push(choice);
       for (const tc of choice.tool_calls) {
