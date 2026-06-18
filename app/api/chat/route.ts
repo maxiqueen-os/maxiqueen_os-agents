@@ -73,9 +73,9 @@ const GROQ_KEY = process.env.GROQ_API_KEY_1 || process.env.GROQ_API_KEY;
 
 function calcular_margen({ items }: { items: Array<{costo: number, precio_venta: number, comision_porcentaje?: number, unidades?: number, moneda?: string}> }) {
   const resultados = items.map(it => {
-    const unidades = it.unidades?? 1;
-    const comision = it.comision_porcentaje?? 0;
-    const moneda = it.moneda?? "USD";
+    const unidades = it.unidades ?? 1;
+    const comision = it.comision_porcentaje ?? 0;
+    const moneda = it.moneda ?? "USD";
     const ingreso = it.precio_venta * unidades;
     const costo_total = it.costo * unidades;
     const beneficio_bruto = ingreso - costo_total;
@@ -86,8 +86,8 @@ function calcular_margen({ items }: { items: Array<{costo: number, precio_venta:
       unidades,
       ingreso_total: +ingreso.toFixed(2),
       beneficio_neto: +beneficio_neto.toFixed(2),
-      margen_bruto_pct: ingreso > 0? +((beneficio_bruto / ingreso) * 100).toFixed(2) : 0,
-      margen_neto_pct: ingreso > 0? +((beneficio_neto / ingreso) * 100).toFixed(2) : 0,
+      margen_bruto_pct: ingreso > 0 ? +((beneficio_bruto / ingreso) * 100).toFixed(2) : 0,
+      margen_neto_pct: ingreso > 0 ? +((beneficio_neto / ingreso) * 100).toFixed(2) : 0,
     };
   });
   return { resultados };
@@ -123,14 +123,14 @@ const tools = [{
 
 function toGeminiContents(messages: any[]) {
   return messages.map((m: any) => ({
-    role: m.role === 'assistant'? 'model' : 'user',
+    role: m.role === 'assistant' ? 'model' : 'user',
     parts: Array.isArray(m.content)
-  ? m.content.map((c: any) =>
+      ? m.content.map((c: any) =>
           c.type === 'text'
-        ? { text: c.text }
+            ? { text: c.text }
             : { inline_data: { mime_type: 'image/jpeg', data: c.image_url.url.split(',')[1] } }
         )
-      : [{ text: m.content }]
+      : [{ text: m.content || "" }]
   }));
 }
 
@@ -154,13 +154,13 @@ async function tryGemini(model: string, apiKey: string, messages: any[], useTool
 
 async function tryGroq(messages: any[], hasImage: boolean, useTools: boolean) {
   const model = hasImage
-? 'meta-llama/llama-4-scout-17b-16e-instruct'
+    ? 'meta-llama/llama-4-scout-17b-16e-instruct'
     : 'llama-3.3-70b-versatile';
 
   const body: any = {
     model,
     messages,
-    temperature: hasImage? 0.4 : 0.6,
+    temperature: hasImage ? 0.4 : 0.6,
     max_tokens: 1024,
   };
 
@@ -184,11 +184,22 @@ async function tryGroq(messages: any[], hasImage: boolean, useTools: boolean) {
 
 export async function POST(req: Request) {
   try {
-    const { message, history = [], imageDataUrl = null, fileData = null } = await req.json();
+    const rawBody = await req.json();
+    // Ajuste clave: Soportar tanto 'message'/'history' como el array estándar 'messages' del frontend
+    const { message, history = [], imageDataUrl = null, fileData = null, messages: frontMessages } = rawBody;
+
+    let incomingMessage = message;
+    let incomingHistory = history;
+
+    if (!incomingMessage && frontMessages && Array.isArray(frontMessages) && frontMessages.length > 0) {
+      const lastMsg = frontMessages[frontMessages.length - 1];
+      incomingMessage = lastMsg.content || lastMsg.text || "";
+      incomingHistory = frontMessages.slice(0, -1);
+    }
 
     // 1. Parsear archivos PDF/Excel/Word en backend
     let fileText = "";
-    if (fileData &&!imageDataUrl) {
+    if (fileData && !imageDataUrl) {
       const base64 = (fileData.dataUrl as string).split(',')[1];
       const buffer = Buffer.from(base64, 'base64');
       const name = (fileData.name as string).toLowerCase();
@@ -212,12 +223,12 @@ export async function POST(req: Request) {
     }
 
     const finalMessage = fileText
-  ? `${message || "Analiza este archivo"}\n\n--- CONTENIDO DE ${fileData?.name} ---\n${fileText}`
-      : message;
+      ? `${incomingMessage || "Analiza este archivo"}\n\n--- CONTENIDO DE ${fileData?.name} ---\n${fileText}`
+      : (incomingMessage || "");
 
-    const hasImage =!!imageDataUrl;
+    const hasImage = !`imageDataUrl;
     const userContent: any = hasImage
-  ? [
+      ? [
           { type: "text", text: finalMessage || "Analiza esta imagen para e-commerce" },
           { type: "image_url", image_url: { url: imageDataUrl } }
         ]
@@ -225,20 +236,20 @@ export async function POST(req: Request) {
 
     let messages: any[] = [
       { role: "system", content: SYSTEM_PROMPT },
-  ...history.filter((m: any) => typeof m.content === "string"),
+      ...incomingHistory.filter((m: any) => m && typeof m.content === "string"),
       { role: "user", content: userContent }
     ];
 
     // Nuevo: Validar que haya keys antes de intentar
-    if (GEMINI_KEYS.length === 0 &&!GROQ_KEY) {
-      return NextResponse.json({ reply: "No hay API keys configuradas en Vercel. Agrega GEMINI_API_KEY_1 o GROQ_API_KEY." }, { status: 500, headers: cors });
+    if (GEMINI_KEYS.length === 0 && !GROQ_KEY) {
+      return NextResponse.json({ reply: "No hay API keys configuradas en Vercel. Agrega GEMINI_API_KEY_1 o GROQ_API_KEY.", text: "No hay API keys configuradas.", response: "No hay API keys configuradas." }, { status: 500, headers: cors });
     }
 
     // 2. Cascada Gemini: 4 modelos x 3 keys
     for (const model of GEMINI_MODELS) {
       for (const apiKey of GEMINI_KEYS) {
         try {
-          let data = await tryGemini(model, apiKey, messages,!hasImage);
+          let data = await tryGemini(model, apiKey, messages, !hasImage);
           let choice = data.candidates?.[0]?.content;
 
           // Manejar tool_calls de Gemini
@@ -257,7 +268,8 @@ export async function POST(req: Request) {
           }
 
           const reply = choice?.parts?.[0]?.text || "Sin respuesta";
-          return NextResponse.json({ reply }, { headers: cors });
+          // Ajuste de salida: Retorna reply, text y response para total compatibilidad con el front
+          return NextResponse.json({ reply, text: reply, response: reply }, { headers: cors });
 
         } catch (e) {
           console.log(`[FAIL] ${model} key ${apiKey.slice(-4)}:`, e);
@@ -269,7 +281,7 @@ export async function POST(req: Request) {
     // 3. Fallback Groq si todo Gemini falla
     if (GROQ_KEY) {
       try {
-        let data = await tryGroq(messages, hasImage,!hasImage);
+        let data = await tryGroq(messages, hasImage, !hasImage);
         let choice = data.choices?.[0]?.message;
 
         // Manejar tool_calls de Groq
@@ -286,17 +298,19 @@ export async function POST(req: Request) {
           choice = data.choices?.[0]?.message;
         }
 
-        return NextResponse.json({ reply: choice?.content || "Sin respuesta" }, { headers: cors });
+        const reply = choice?.content || "Sin respuesta";
+        // Ajuste de salida: Retorna reply, text y response para total compatibilidad con el front
+        return NextResponse.json({ reply, text: reply, response: reply }, { headers: cors });
 
       } catch (e) {
         console.log('[FAIL] Groq:', e);
       }
     }
 
-    return NextResponse.json({ reply: "Todos los modelos fallaron. Verifica tus API keys en Vercel o intenta de nuevo." }, { status: 500, headers: cors });
+    return NextResponse.json({ reply: "Todos los modelos fallaron. Verifica tus API keys en Vercel o intenta de nuevo.", text: "Todos los modelos fallaron.", response: "Todos los modelos fallaron." }, { status: 500, headers: cors });
 
   } catch (e: any) {
     console.error('ERROR GENERAL:', e);
-    return NextResponse.json({ reply: `Error servidor: ${e.message}` }, { status: 500, headers: cors });
+    return NextResponse.json({ reply: `Error servidor: ${e.message}`, text: `Error servidor: ${e.message}`, response: `Error servidor: ${e.message}` }, { status: 500, headers: cors });
   }
 }
