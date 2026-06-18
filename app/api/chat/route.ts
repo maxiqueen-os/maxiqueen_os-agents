@@ -1,11 +1,7 @@
 import { NextResponse } from "next/server";
-import pdfParse from "pdf-parse";
-import * as XLSX from "xlsx";
-import * as mammoth from "mammoth";
 
 export const runtime = "nodejs";
 export const dynamic = 'force-dynamic';
-export const maxDuration = 60; // Nuevo: Vercel Pro timeout
 
 const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -17,6 +13,9 @@ export async function OPTIONS() {
   return new Response(null, { headers: cors });
 }
 
+// =========================================================================
+// 1. CAPA DE MENSAJERÍA Y CONFIGURACIÓN (CONCIENCIA)
+// =========================================================================
 const SYSTEM_PROMPT = `Eres MaxiQueen OS, asistente de César Julio Bedoya Barragán, Cúcuta, Colombia. ORCID 0009-0004-4946-1374.
 
 MaxiQueen OS convierte ideas, historias y negocios en activos digitales rentables. JavaScript es el cuerpo, Python es la mente, tú eres la conciencia.
@@ -56,21 +55,9 @@ Reglas de respuesta:
 - Si te adjuntan un archivo, analízalo y da un informe estructurado.
 `;
 
-const GEMINI_KEYS = [
-  process.env.GEMINI_API_KEY_1,
-  process.env.GEMINI_API_KEY_2,
-  process.env.GEMINI_API_KEY_3,
-].filter(Boolean);
-
-const GEMINI_MODELS = [
-  'gemini-2.0-flash-exp',
-  'gemini-1.5-pro-latest',
-  'gemini-1.5-flash-latest',
-  'gemini-pro'
-];
-
-const GROQ_KEY = process.env.GROQ_API_KEY_1 || process.env.GROQ_API_KEY;
-
+// =========================================================================
+// 2. CAPA DE HERRAMIENTAS (TOOL ENGINE AISLADO)
+// =========================================================================
 function calcular_margen({ items }: { items: Array<{costo: number, precio_venta: number, comision_porcentaje?: number, unidades?: number, moneda?: string}> }) {
   const resultados = items.map(it => {
     const unidades = it.unidades ?? 1;
@@ -93,7 +80,7 @@ function calcular_margen({ items }: { items: Array<{costo: number, precio_venta:
   return { resultados };
 }
 
-const tools = [{
+const toolDeclaration = [{
   type: "function",
   function: {
     name: "calcular_margen",
@@ -121,6 +108,9 @@ const tools = [{
   }
 }];
 
+// =========================================================================
+// 3. CONTROLADORES DE PROVEEDORES (ADAPTER PATTERN)
+// =========================================================================
 function toGeminiContents(messages: any[]) {
   return messages.map((m: any) => ({
     role: m.role === 'assistant' ? 'model' : 'user',
@@ -136,10 +126,9 @@ function toGeminiContents(messages: any[]) {
 
 async function tryGemini(model: string, apiKey: string, messages: any[], useTools: boolean) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-
   const body: any = { contents: toGeminiContents(messages) };
   if (useTools) {
-    body.tools = [{ function_declarations: tools.map(t => t.function) }];
+    body.tools = [{ function_declarations: toolDeclaration.map(t => t.function) }];
   }
 
   const res = await fetch(url, {
@@ -148,15 +137,15 @@ async function tryGemini(model: string, apiKey: string, messages: any[], useTool
     body: JSON.stringify(body)
   });
 
-  if (!res.ok) throw new Error(`Gemini ${model} ${res.status}`);
+  if (!res.ok) throw new Error(`Gemini_Error:${res.status}`);
   return res.json();
 }
 
 async function tryGroq(messages: any[], hasImage: boolean, useTools: boolean) {
-  const model = hasImage
-    ? 'meta-llama/llama-4-scout-17b-16e-instruct'
-    : 'llama-3.3-70b-versatile';
+  const groqKey = process.env.GROQ_API_KEY_1 || process.env.GROQ_API_KEY;
+  if (!groqKey) throw new Error("Groq_Key_Missing");
 
+  const model = hasImage ? 'meta-llama/llama-4-scout-17b-16e-instruct' : 'llama-3.3-70b-versatile';
   const body: any = {
     model,
     messages,
@@ -165,27 +154,39 @@ async function tryGroq(messages: any[], hasImage: boolean, useTools: boolean) {
   };
 
   if (!hasImage && useTools) {
-    body.tools = tools;
+    body.tools = toolDeclaration;
     body.tool_choice = "auto";
   }
 
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${GROQ_KEY}`,
+      'Authorization': `Bearer ${groqKey}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify(body)
   });
 
-  if (!res.ok) throw new Error(`Groq ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new Error(`Groq_Error:${res.status}`);
   return res.json();
 }
 
+// =========================================================================
+// 4. ORQUESTADOR CENTRAL (ROUTER IA)
+// =========================================================================
 export async function POST(req: Request) {
   try {
     const rawBody = await req.json();
-    const { message, history = [], imageDataUrl = null, fileData = null, messages: frontMessages } = rawBody;
+    const { message, history = [], imageDataUrl = null, messages: frontMessages, fileData = null } = rawBody;
+
+    // INTERCEPTOR DE SEGURIDAD PARA FILEDATA (Evita respuestas vacías/rotas en Vercel Hobby)
+    if (fileData && !imageDataUrl) {
+      return NextResponse.json({ 
+        reply: "Para analizar archivos (PDF, Excel o Word) de forma 100% gratuita, asegúrate de activar el extractor del Frontend. El chat principal solo procesa texto directo e imágenes para mantener el ecosistema optimizado.",
+        text: "Usa el extractor optimizado del frontend",
+        response: "Usa el extractor optimizado del frontend" 
+      }, { headers: cors });
+    }
 
     let incomingMessage = message;
     let incomingHistory = history;
@@ -196,36 +197,9 @@ export async function POST(req: Request) {
       incomingHistory = frontMessages.slice(0, -1);
     }
 
-    // 1. Parsear archivos PDF/Excel/Word en backend
-    let fileText = "";
-    if (fileData && !imageDataUrl) {
-      const base64 = (fileData.dataUrl as string).split(',')[1];
-      const buffer = Buffer.from(base64, 'base64');
-      const name = (fileData.name as string).toLowerCase();
-      try {
-        if (fileData.mime === "application/pdf" || name.endsWith(".pdf")) {
-          const parsed = await pdfParse(buffer);
-          fileText = parsed.text.slice(0, 12000);
-        } else if (fileData.mime.includes("spreadsheet") || name.endsWith(".xlsx") || name.endsWith(".xls")) {
-          const wb = XLSX.read(buffer, { type: "buffer" });
-          fileText = wb.SheetNames.map((n: string) => `### Hoja: ${n}\n` + XLSX.utils.sheet_to_csv(wb.Sheets[n])).join("\n\n").slice(0, 12000);
-        } else if (fileData.mime.includes("word") || name.endsWith(".docx")) {
-          const result = await mammoth.extractRawText({ buffer });
-          fileText = result.value.slice(0, 12000);
-        } else if (name.endsWith(".txt") || fileData.mime === "text/plain") {
-          fileText = buffer.toString('utf-8').slice(0, 12000);
-        }
-      } catch(e:any) {
-        console.error('FILE PARSE ERROR:', e);
-        fileText = `[Error leyendo archivo: ${e.message}]`;
-      }
-    }
-
-    const finalMessage = fileText
-      ? `${incomingMessage || "Analiza este archivo"}\n\n--- CONTENIDO DE ${fileData?.name} ---\n${fileText}`
-      : (incomingMessage || "");
-
+    const finalMessage = incomingMessage || "";
     const hasImage = !!imageDataUrl;
+    
     const userContent: any = hasImage
       ? [
           { type: "text", text: finalMessage || "Analiza esta imagen para e-commerce" },
@@ -239,13 +213,22 @@ export async function POST(req: Request) {
       { role: "user", content: userContent }
     ];
 
-    if (GEMINI_KEYS.length === 0 && !GROQ_KEY) {
-      return NextResponse.json({ reply: "No hay API keys configuradas en Vercel. Agrega GEMINI_API_KEY_1 o GROQ_API_KEY.", text: "No hay API keys configuradas.", response: "No hay API keys configuradas." }, { status: 500, headers: cors });
-    }
+    const geminiKeys = [
+      process.env.GEMINI_API_KEY_1,
+      process.env.GEMINI_API_KEY_2,
+      process.env.GEMINI_API_KEY_3,
+    ].filter(Boolean);
 
-    // 2. Cascada Gemini: 4 modelos x 3 keys
-    for (const model of GEMINI_MODELS) {
-      for (const apiKey of GEMINI_KEYS) {
+    const geminiModels = [
+      'gemini-2.0-flash-exp',
+      'gemini-1.5-pro-latest',
+      'gemini-1.5-flash-latest',
+      'gemini-pro'
+    ];
+
+    // --- FLUJO LINEAL ANTI-EXPLOSIÓN COMBINATORIA ---
+    for (const apiKey of geminiKeys) {
+      for (const model of geminiModels) {
         try {
           let data = await tryGemini(model, apiKey, messages, !hasImage);
           let choice = data.candidates?.[0]?.content;
@@ -267,44 +250,46 @@ export async function POST(req: Request) {
           const reply = choice?.parts?.[0]?.text || "Sin respuesta";
           return NextResponse.json({ reply, text: reply, response: reply }, { headers: cors });
 
-        } catch (e) {
-          console.log(`[FAIL] ${model} key ${apiKey.slice(-4)}:`, e);
-          continue;
+        } catch (e: any) {
+          console.log(`[FAILOVER-GEMINI] Modelo ${model} falló con llave activa:`, e.message);
+          if (e.message.includes("429")) break; // Salta de inmediato a la siguiente key libre
+          continue; 
         }
       }
     }
 
-    // 3. Fallback Groq si todo Gemini falla
-    if (GROQ_KEY) {
-      try {
-        let data = await tryGroq(messages, hasImage, !hasImage);
-        let choice = data.choices?.[0]?.message;
+    // --- FALLBACK ABSOLUTO CON GROQ ---
+    try {
+      let data = await tryGroq(messages, hasImage, !hasImage);
+      let choice = data.choices?.[0]?.message;
 
-        if (!hasImage && choice?.tool_calls?.length) {
-          messages.push(choice);
-          for (const tc of choice.tool_calls) {
-            if (tc.function.name === "calcular_margen") {
-              const args = JSON.parse(tc.function.arguments || '{"items":[]}');
-              const result = calcular_margen(args);
-              messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(result) });
-            }
+      if (!hasImage && choice?.tool_calls?.length) {
+        messages.push(choice);
+        for (const tc of choice.tool_calls) {
+          if (tc.function.name === "calcular_margen") {
+            const args = JSON.parse(tc.function.arguments || '{"items":[]}');
+            const result = calcular_margen(args);
+            messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(result) });
           }
-          data = await tryGroq(messages, hasImage, false);
-          choice = data.choices?.[0]?.message;
         }
-
-        const reply = choice?.content || "Sin respuesta";
-        return NextResponse.json({ reply, text: reply, response: reply }, { headers: cors });
-
-      } catch (e) {
-        console.log('[FAIL] Groq:', e);
+        data = await tryGroq(messages, hasImage, false);
+        choice = data.choices?.[0]?.message;
       }
+
+      const reply = choice?.content || "Sin respuesta";
+      return NextResponse.json({ reply, text: reply, response: reply }, { headers: cors });
+
+    } catch (e: any) {
+      console.log('[FALLBACK-CRÍTICO] Groq también falló:', e.message);
     }
 
-    return NextResponse.json({ reply: "Todos los modelos fallaron. Verifica tus API keys en Vercel o intenta de nuevo.", text: "Todos los modelos fallaron.", response: "Todos los modelos fallaron." }, { status: 500, headers: cors });
+    return NextResponse.json(
+      { reply: "Todos los recursos gratuitos y llaves de respaldo se encuentran agotados actualmente." }, 
+      { status: 500, headers: cors }
+    );
 
   } catch (e: any) {
-    console.error('ERROR GENERAL:', e);
-    return NextResponse.json({ reply: `Error servidor: ${e.message}`, text: `Error servidor: ${e.message}`, response: `Error servidor: ${e.message}` }, { status: 500, headers: cors });
+    console.error('ERROR CRÍTICO DEL SERVIDOR:', e);
+    return NextResponse.json({ reply: `Error interno de MaxiQueen OS: ${e.message}` }, { status: 500, headers: cors });
   }
 }
