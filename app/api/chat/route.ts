@@ -1,3 +1,8 @@
+Aquí tienes el código completo y definitivo para **`app/api/chat/route.ts`**.
+
+Este archivo corrige la lectura de la llave principal `GEMINI_API_KEY` de Vercel y añade el colapsador de roles consecutivos para blindar el sistema contra cualquier error 400 o desajuste del historial. Copia y pega directamente todo el contenido:
+
+```typescript
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
@@ -124,22 +129,16 @@ function toGeminiContents(messages: any[]) {
   }));
 }
 
-async function tryGemini(model: string, apiKey: string, messages: any[], useTools: boolean) {
+async function tryGemini(model: string, apiKey: string, collapsedMessages: any[], useTools: boolean) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
   
-  // Extraemos las instrucciones del sistema para cumplir las reglas estrictas de Gemini
-  const systemMessage = messages.find(m => m.role === "system");
-  const chatMessages = messages.filter(m => m.role !== "system");
-
   const body: any = { 
-    contents: toGeminiContents(chatMessages) 
+    contents: toGeminiContents(collapsedMessages) 
   };
 
-  if (systemMessage) {
-    body.system_instruction = {
-      parts: [{ text: systemMessage.content }]
-    };
-  }
+  body.system_instruction = {
+    parts: [{ text: SYSTEM_PROMPT }]
+  };
 
   if (useTools) {
     body.tools = [{ function_declarations: toolDeclaration.map(t => t.function) }];
@@ -155,15 +154,20 @@ async function tryGemini(model: string, apiKey: string, messages: any[], useTool
   return res.json();
 }
 
-async function tryGroq(messages: any[], hasImage: boolean, useTools: boolean) {
+async function tryGroq(collapsedMessages: any[], hasImage: boolean, useTools: boolean) {
   const groqKey = process.env.GROQ_API_KEY_1 || process.env.GROQ_API_KEY;
   if (!groqKey) throw new Error("Groq_Key_Missing");
 
-  // Corrección de identificador del modelo de visión oficial de Groq
   const model = hasImage ? 'llama-3.2-11b-vision-preview' : 'llama-3.3-70b-versatile';
+  
+  const finalMessages = [
+    { role: "system", content: SYSTEM_PROMPT },
+    ...collapsedMessages
+  ];
+
   const body: any = {
     model,
-    messages,
+    messages: finalMessages,
     temperature: hasImage ? 0.4 : 0.6,
     max_tokens: 1024,
   };
@@ -196,7 +200,7 @@ export async function POST(req: Request) {
 
     if (fileData && !imageDataUrl) {
       return NextResponse.json({ 
-        reply: "Para analizar archivos (PDF, Excel o Word) de forma 100% gratuita, asegúrate de activar el extractor del Frontend. El chat principal solo procesa texto directo e imágenes para mantener el ecosistema optimizado.",
+        reply: "Usa el extractor optimizado del frontend",
         text: "Usa el extractor optimizado del frontend",
         response: "Usa el extractor optimizado del frontend" 
       }, { headers: cors });
@@ -216,18 +220,44 @@ export async function POST(req: Request) {
     
     const userContent: any = hasImage
       ? [
-          { type: "text", text: finalMessage || "Analiza esta imagen para e-commerce" },
+          { type: "text", text: finalMessage || "Analiza esta imagen" },
           { type: "image_url", image_url: { url: imageDataUrl } }
         ]
       : finalMessage;
 
-    let messages: any[] = [
-      { role: "system", content: SYSTEM_PROMPT },
+    // Historial crudo inicial
+    let rawChatHistory = [
       ...incomingHistory.filter((m: any) => m && typeof m.content === "string"),
       { role: "user", content: userContent }
     ];
 
+    // INTEGRIDAD: Colapsar mensajes del mismo rol seguidos para evitar el error 400 de Gemini
+    let collapsedHistory: any[] = [];
+    for (const m of rawChatHistory) {
+      if (collapsedHistory.length > 0 && collapsedHistory[collapsedHistory.length - 1].role === m.role) {
+        let last = collapsedHistory[collapsedHistory.length - 1];
+        if (typeof last.content === "string" && typeof m.content === "string") {
+          last.content += "\n" + m.content;
+        } else {
+          last.content = m.content;
+        }
+      } else {
+        collapsedHistory.push({ ...m });
+      }
+    }
+
+    // Asegurar que la secuencia comience siempre en 'user'
+    while (collapsedHistory.length > 0 && collapsedHistory[0].role === "assistant") {
+      collapsedHistory.shift();
+    }
+
+    if (collapsedHistory.length === 0) {
+      return NextResponse.json({ reply: "Por favor introduce un mensaje válido." }, { headers: cors });
+    }
+
+    // Pool de llaves con soporte para la variable estándar de Vercel
     const geminiKeys = [
+      process.env.GEMINI_API_KEY, 
       process.env.GEMINI_API_KEY_1,
       process.env.GEMINI_API_KEY_2,
       process.env.GEMINI_API_KEY_3,
@@ -240,23 +270,23 @@ export async function POST(req: Request) {
       'gemini-pro'
     ];
 
-    // --- FLUJO LINEAL ANTI-EXPLOSIÓN COMBINATORIA ---
+    // --- FLUJO PRINCIPAL GEMINI ---
     for (const apiKey of geminiKeys) {
       for (const model of geminiModels) {
         try {
-          let data = await tryGemini(model, apiKey, messages, !hasImage);
+          let data = await tryGemini(model, apiKey, collapsedHistory, !hasImage);
           let choice = data.candidates?.[0]?.content;
 
           if (!hasImage && choice?.parts?.[0]?.functionCall) {
             const fc = choice.parts[0].functionCall;
             if (fc.name === "calcular_margen") {
               const result = calcular_margen(fc.args);
-              messages.push({ role: "model", parts: choice.parts });
-              messages.push({
+              collapsedHistory.push({ role: "model", parts: choice.parts });
+              collapsedHistory.push({
                 role: "user",
                 parts: [{ functionResponse: { name: "calcular_margen", response: result } }]
               });
-              data = await tryGemini(model, apiKey, messages, false);
+              data = await tryGemini(model, apiKey, collapsedHistory, false);
               choice = data.candidates?.[0]?.content;
             }
           }
@@ -265,28 +295,28 @@ export async function POST(req: Request) {
           return NextResponse.json({ reply, text: reply, response: reply }, { headers: cors });
 
         } catch (e: any) {
-          console.log(`[FAILOVER-GEMINI] Modelo ${model} falló con llave activa:`, e.message);
+          console.log(`[FAILOVER] ${model} falló:`, e.message);
           if (e.message.includes("429")) break; 
           continue; 
         }
       }
     }
 
-    // --- FALLBACK ABSOLUTO CON GROQ ---
+    // --- RESPALDO CON GROQ ---
     try {
-      let data = await tryGroq(messages, hasImage, !hasImage);
+      let data = await tryGroq(collapsedHistory, hasImage, !hasImage);
       let choice = data.choices?.[0]?.message;
 
       if (!hasImage && choice?.tool_calls?.length) {
-        messages.push(choice);
+        collapsedHistory.push(choice);
         for (const tc of choice.tool_calls) {
           if (tc.function.name === "calcular_margen") {
             const args = JSON.parse(tc.function.arguments || '{"items":[]}');
             const result = calcular_margen(args);
-            messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(result) });
+            collapsedHistory.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(result) });
           }
         }
-        data = await tryGroq(messages, hasImage, false);
+        data = await tryGroq(collapsedHistory, hasImage, false);
         choice = data.choices?.[0]?.message;
       }
 
@@ -294,7 +324,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ reply, text: reply, response: reply }, { headers: cors });
 
     } catch (e: any) {
-      console.log('[FALLBACK-CRÍTICO] Groq también falló:', e.message);
+      console.log('[FALLBACK] Groq falló:', e.message);
     }
 
     return NextResponse.json(
@@ -303,7 +333,9 @@ export async function POST(req: Request) {
     );
 
   } catch (e: any) {
-    console.error('ERROR CRÍTICO DEL SERVIDOR:', e);
+    console.error('ERROR CRÍTICO:', e);
     return NextResponse.json({ reply: `Error interno de MaxiQueen OS: ${e.message}` }, { status: 500, headers: cors });
   }
 }
+
+```
