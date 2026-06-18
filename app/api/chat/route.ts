@@ -185,7 +185,6 @@ async function tryGroq(messages: any[], hasImage: boolean, useTools: boolean) {
 export async function POST(req: Request) {
   try {
     const rawBody = await req.json();
-    // Ajuste clave: Soportar tanto 'message'/'history' como el array estándar 'messages' del frontend
     const { message, history = [], imageDataUrl = null, fileData = null, messages: frontMessages } = rawBody;
 
     let incomingMessage = message;
@@ -226,7 +225,7 @@ export async function POST(req: Request) {
       ? `${incomingMessage || "Analiza este archivo"}\n\n--- CONTENIDO DE ${fileData?.name} ---\n${fileText}`
       : (incomingMessage || "");
 
-    const hasImage = !`imageDataUrl;
+    const hasImage = !!imageDataUrl;
     const userContent: any = hasImage
       ? [
           { type: "text", text: finalMessage || "Analiza esta imagen para e-commerce" },
@@ -240,7 +239,6 @@ export async function POST(req: Request) {
       { role: "user", content: userContent }
     ];
 
-    // Nuevo: Validar que haya keys antes de intentar
     if (GEMINI_KEYS.length === 0 && !GROQ_KEY) {
       return NextResponse.json({ reply: "No hay API keys configuradas en Vercel. Agrega GEMINI_API_KEY_1 o GROQ_API_KEY.", text: "No hay API keys configuradas.", response: "No hay API keys configuradas." }, { status: 500, headers: cors });
     }
@@ -252,7 +250,6 @@ export async function POST(req: Request) {
           let data = await tryGemini(model, apiKey, messages, !hasImage);
           let choice = data.candidates?.[0]?.content;
 
-          // Manejar tool_calls de Gemini
           if (!hasImage && choice?.parts?.[0]?.functionCall) {
             const fc = choice.parts[0].functionCall;
             if (fc.name === "calcular_margen") {
@@ -268,7 +265,6 @@ export async function POST(req: Request) {
           }
 
           const reply = choice?.parts?.[0]?.text || "Sin respuesta";
-          // Ajuste de salida: Retorna reply, text y response para total compatibilidad con el front
           return NextResponse.json({ reply, text: reply, response: reply }, { headers: cors });
 
         } catch (e) {
@@ -284,7 +280,6 @@ export async function POST(req: Request) {
         let data = await tryGroq(messages, hasImage, !hasImage);
         let choice = data.choices?.[0]?.message;
 
-        // Manejar tool_calls de Groq
         if (!hasImage && choice?.tool_calls?.length) {
           messages.push(choice);
           for (const tc of choice.tool_calls) {
@@ -299,7 +294,6 @@ export async function POST(req: Request) {
         }
 
         const reply = choice?.content || "Sin respuesta";
-        // Ajuste de salida: Retorna reply, text y response para total compatibilidad con el front
         return NextResponse.json({ reply, text: reply, response: reply }, { headers: cors });
 
       } catch (e) {
