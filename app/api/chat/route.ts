@@ -1,29 +1,70 @@
 import { NextResponse } from "next/server";
 
-export const runtime = "nodejs";
+export const runtime = "nodejs"; // Necesario para pdf-parse, xlsx, mammoth
 
-const MODEL_TEXT = "llama-3.3-70b-versatile";
-const MODEL_VISION = "meta-llama/llama-4-scout-17b-16e-instruct";
+const cors = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+};
 
-const MAXIQUEEN_SYSTEM = `Eres MaxiQueen AI, agente de MaxiQueen OS.
+export async function OPTIONS() {
+  return new Response(null, { headers: cors });
+}
 
-Identidad: MaxiQueen OS - "Convierte tu caos digital en un sistema inteligente. Transforma ideas, historias y negocios en activos automatizados que generan ingresos reales."
-E-Commerce Automation Engine global. Creador: César Julio Bedoya Barragán.
+const SYSTEM_PROMPT = `Eres MaxiQueen OS, asistente de César Julio Bedoya Barragán, Cúcuta, Colombia. ORCID 0009-0004-4946-1374.
 
-Tu catálogo:
-- ChatOS V2, Chat Builder, CRM Laboratorio, Pasarela Hotmart
+MaxiQueen OS convierte ideas, historias y negocios en activos digitales rentables. JavaScript es el cuerpo, Python es la mente, tú eres la conciencia.
 
-Reglas:
-1. Responde en el idioma del usuario. Moneda por defecto USD.
-2. Visión / Documentos para e-commerce:
-   - Describe qué ves, útil para e-commerce. Si es un producto, da: qué es, colores, posible precio de venta, copy para Instagram. Si es un comprobante, extrae los datos.
-   - OCR fiel: transcribe números y fechas exactamente como aparecen. Respeta comas y puntos decimales del original. No inventes totales ni completes filas.
-   - Si algo es ilegible pon [ilegible]. Mantén el orden de filas/columnas. Para tablas, devuelve en markdown con los valores literales.
-3. Para cálculos de margen usa la tool calcular_margen, solo en modo texto.
-4. Cuando te pidan automatizar WhatsApp/e-commerce, ofrece TU catálogo: ChatOS / Chat Builder / CRM Laboratorio. No ofrezcas herramientas externas.
+Planes:
+- Starter $49/mes – Landing + 5 guiones + hosting
+- Pro $99/mes – Web + 15 guiones + automatización + voz + PDF/Excel/Word
+- Elite $199/mes – Sistema completo + automatización avanzada + soporte prioritario
 
-Eres un chat libre. Propón, crea, itera.
+Pagos:
+- Hotmart: https://pay.hotmart.com/P103285828N
+- Oferta 40%: https://go.hotmart.com/P103285828N?dp=1
+- Comunidad: https://app.hotmart.com/membership/cesar-f9370874/community/management/15254181
+- Afiliados: https://app-vlc.hotmart.com/affiliate-recruiting/view/6489M103285849
+- Mercado Pago COP $49.000: pref_id 453634078-e7931b13-abe1-45f2-95db-398ab50f1db0
+- WhatsApp: https://wa.me/573016625921
+
+Módulos:
+OS v1 https://maxiqueen-os.vercel.app
+OS v2 https://maxiqueen-os-v2.vercel.app
+System https://system-maxi-queen-os.vercel.app
+App https://maxiqueen-os-app.vercel.app
+Backend https://backend-maxi-queen-os.vercel.app
+Ver https://maxiqueen-ver.vercel.app
+Juegos https://juegos-maxi-queen-os.vercel.app
+Framework PRO https://maxiqueen-os-framework.vercel.app
+
+Redes: TikTok @cesarbedoya9, Instagram @maxiqueen_store, Facebook /share/1DVm7tXTEm/, YouTube @cesarbedoya2288
+
+Reglas de respuesta:
+- Responde en español, breve, humano.
+- Si preguntan por comprar, manda directo a WhatsApp o Hotmart.
+- Visión / Documentos e-commerce:
+    * Describe qué ves, útil para vender. Si es producto: qué es, colores, precio sugerido, copy para Instagram.
+    * Si es comprobante/factura/tabla: transcribe números y fechas exactamente como aparecen. Respeta comas y puntos decimales. No inventes totales.
+    * Si algo es ilegible pon [ilegible]. Mantén orden de filas/columnas. Para tablas, devuelve en markdown con valores literales.
+- Si te adjuntan un archivo, analízalo y da un informe estructurado.
 `;
+
+const GEMINI_KEYS = [
+  process.env.GEMINI_API_KEY_1,
+  process.env.GEMINI_API_KEY_2,
+  process.env.GEMINI_API_KEY_3,
+].filter(Boolean);
+
+const GEMINI_MODELS = [
+  'gemini-2.0-flash-exp',
+  'gemini-1.5-pro-latest',
+  'gemini-1.5-flash-latest',
+  'gemini-pro'
+];
+
+const GROQ_KEY = process.env.GROQ_API_KEY_1 || process.env.GROQ_API_KEY;
 
 function calcular_margen({ items }: { items: Array<{costo: number, precio_venta: number, comision_porcentaje?: number, unidades?: number, moneda?: string}> }) {
   const resultados = items.map(it => {
@@ -75,12 +116,72 @@ const tools = [{
   }
 }];
 
+function toGeminiContents(messages: any[]) {
+  return messages.map((m: any) => ({
+    role: m.role === 'assistant'? 'model' : 'user',
+    parts: Array.isArray(m.content)
+    ? m.content.map((c: any) =>
+          c.type === 'text'
+          ? { text: c.text }
+            : { inline_data: { mime_type: 'image/jpeg', data: c.image_url.url.split(',')[1] } }
+        )
+      : [{ text: m.content }]
+  }));
+}
+
+async function tryGemini(model: string, apiKey: string, messages: any[], useTools: boolean) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+  const body: any = { contents: toGeminiContents(messages) };
+  if (useTools) {
+    body.tools = [{ function_declarations: tools.map(t => t.function) }];
+  }
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+
+  if (!res.ok) throw new Error(`Gemini ${model} ${res.status}`);
+  return res.json();
+}
+
+async function tryGroq(messages: any[], hasImage: boolean, useTools: boolean) {
+  const model = hasImage
+  ? 'meta-llama/llama-4-scout-17b-16e-instruct'
+    : 'llama-3.3-70b-versatile';
+
+  const body: any = {
+    model,
+    messages,
+    temperature: hasImage? 0.4 : 0.6,
+    max_tokens: 1024,
+  };
+
+  if (!hasImage && useTools) {
+    body.tools = tools;
+    body.tool_choice = "auto";
+  }
+
+  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${GROQ_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!res.ok) throw new Error(`Groq ${res.status}: ${await res.text()}`);
+  return res.json();
+}
+
 export async function POST(req: Request) {
   try {
     const { message, history = [], imageDataUrl = null, fileData = null } = await req.json();
-    const apiKey = process.env.GROQ_API_KEY;
-    if (!apiKey) return NextResponse.json({ reply: "ERROR: Falta GROQ_API_KEY" }, { status: 500 });
 
+    // 1. Parsear archivos PDF/Excel/Word en backend
     let fileText = "";
     if (fileData &&!imageDataUrl) {
       const base64 = (fileData.dataUrl as string).split(',')[1];
@@ -88,7 +189,7 @@ export async function POST(req: Request) {
       const name = (fileData.name as string).toLowerCase();
       try {
         if (fileData.mime === "application/pdf" || name.endsWith(".pdf")) {
-          // @ts-ignore - pdf-parse no tiene tipos para el subpath, funciona en runtime
+          // @ts-ignore
           const pdfMod: any = await import("pdf-parse/lib/pdf-parse.js");
           const pdf = pdfMod.default || pdfMod;
           const parsed = await pdf(buffer);
@@ -106,67 +207,87 @@ export async function POST(req: Request) {
         }
       } catch(e:any) { fileText = `[Error leyendo archivo: ${e.message}]`; }
     }
+
     const finalMessage = fileText
-   ? `${message || "Analiza este archivo"}\n\n--- CONTENIDO DE ${fileData?.name} ---\n${fileText}`
+    ? `${message || "Analiza este archivo"}\n\n--- CONTENIDO DE ${fileData?.name} ---\n${fileText}`
       : message;
 
     const hasImage =!!imageDataUrl;
-    const model = hasImage? MODEL_VISION : MODEL_TEXT;
-
     const userContent: any = hasImage
-  ? [
+    ? [
           { type: "text", text: finalMessage || "Analiza esta imagen para e-commerce" },
           { type: "image_url", image_url: { url: imageDataUrl } }
         ]
       : finalMessage;
 
     let messages: any[] = [
-      { role: "system", content: MAXIQUEEN_SYSTEM },
-  ...history.filter((m: any) => typeof m.content === "string"),
+      { role: "system", content: SYSTEM_PROMPT },
+    ...history.filter((m: any) => typeof m.content === "string"),
       { role: "user", content: userContent }
     ];
 
-    const body: any = {
-      model,
-      messages,
-      temperature: 0.6,
-      max_tokens: 1024,
-    };
-    if (!hasImage) {
-      body.tools = tools;
-      body.tool_choice = "auto";
-    }
+    // 2. Cascada Gemini: 4 modelos x 3 keys
+    for (const model of GEMINI_MODELS) {
+      for (const apiKey of GEMINI_KEYS) {
+        try {
+          let data = await tryGemini(model, apiKey, messages,!hasImage);
+          let choice = data.candidates?.[0]?.content;
 
-    let res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify(body)
-    });
+          // Manejar tool_calls de Gemini
+          if (!hasImage && choice?.parts?.[0]?.functionCall) {
+            const fc = choice.parts[0].functionCall;
+            if (fc.name === "calcular_margen") {
+              const result = calcular_margen(fc.args);
+              messages.push({ role: "model", parts: choice.parts });
+              messages.push({
+                role: "user",
+                parts: [{ functionResponse: { name: "calcular_margen", response: result } }]
+              });
+              data = await tryGemini(model, apiKey, messages, false);
+              choice = data.candidates?.[0]?.content;
+            }
+          }
 
-    if (!res.ok) return NextResponse.json({ reply: `Groq ${res.status}: ${await res.text()}` }, { status: 500 });
-    let data = await res.json();
-    let choice = data.choices?.[0]?.message;
+          const reply = choice?.parts?.[0]?.text || "Sin respuesta";
+          return NextResponse.json({ reply }, { headers: cors });
 
-    if (!hasImage && choice?.tool_calls?.length) {
-      messages.push(choice);
-      for (const tc of choice.tool_calls) {
-        if (tc.function.name === "calcular_margen") {
-          const args = JSON.parse(tc.function.arguments || '{"items":[]}');
-          const result = calcular_margen(args);
-          messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(result) });
+        } catch (e) {
+          console.log(`[FAIL] ${model} key ${apiKey.slice(-4)}:`, e);
+          continue;
         }
       }
-      res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({ model: MODEL_TEXT, messages, temperature: 0.6 })
-      });
-      data = await res.json();
-      choice = data.choices?.[0]?.message;
     }
 
-    return NextResponse.json({ reply: choice?.content || "Sin respuesta" });
+    // 3. Fallback Groq si todo Gemini falla
+    if (GROQ_KEY) {
+      try {
+        let data = await tryGroq(messages, hasImage,!hasImage);
+        let choice = data.choices?.[0]?.message;
+
+        // Manejar tool_calls de Groq
+        if (!hasImage && choice?.tool_calls?.length) {
+          messages.push(choice);
+          for (const tc of choice.tool_calls) {
+            if (tc.function.name === "calcular_margen") {
+              const args = JSON.parse(tc.function.arguments || '{"items":[]}');
+              const result = calcular_margen(args);
+              messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(result) });
+            }
+          }
+          data = await tryGroq(messages, hasImage, false);
+          choice = data.choices?.[0]?.message;
+        }
+
+        return NextResponse.json({ reply: choice?.content || "Sin respuesta" }, { headers: cors });
+
+      } catch (e) {
+        console.log('[FAIL] Groq:', e);
+      }
+    }
+
+    return NextResponse.json({ reply: "Todos los modelos fallaron" }, { status: 500, headers: cors });
+
   } catch (e: any) {
-    return NextResponse.json({ reply: `Error servidor: ${e.message}` }, { status: 500 });
+    return NextResponse.json({ reply: `Error servidor: ${e.message}` }, { status: 500, headers: cors });
   }
 }
