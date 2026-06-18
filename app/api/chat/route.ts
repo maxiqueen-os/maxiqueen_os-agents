@@ -1,8 +1,3 @@
-Aquí tienes el código completo y definitivo para **`app/api/chat/route.ts`**.
-
-Este archivo corrige la lectura de la llave principal `GEMINI_API_KEY` de Vercel y añade el colapsador de roles consecutivos para blindar el sistema contra cualquier error 400 o desajuste del historial. Copia y pega directamente todo el contenido:
-
-```typescript
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
