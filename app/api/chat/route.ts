@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
+import pdfParse from "pdf-parse";
+import * as XLSX from "xlsx";
+import * as mammoth from "mammoth";
 
 export const runtime = "nodejs";
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60; // Nuevo: Vercel Pro timeout
 
 const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -82,8 +86,8 @@ function calcular_margen({ items }: { items: Array<{costo: number, precio_venta:
       unidades,
       ingreso_total: +ingreso.toFixed(2),
       beneficio_neto: +beneficio_neto.toFixed(2),
-      margen_bruto_pct: +((beneficio_bruto / ingreso) * 100).toFixed(2),
-      margen_neto_pct: +((beneficio_neto / ingreso) * 100).toFixed(2),
+      margen_bruto_pct: ingreso > 0? +((beneficio_bruto / ingreso) * 100).toFixed(2) : 0,
+      margen_neto_pct: ingreso > 0? +((beneficio_neto / ingreso) * 100).toFixed(2) : 0,
     };
   });
   return { resultados };
@@ -121,9 +125,9 @@ function toGeminiContents(messages: any[]) {
   return messages.map((m: any) => ({
     role: m.role === 'assistant'? 'model' : 'user',
     parts: Array.isArray(m.content)
-   ? m.content.map((c: any) =>
+  ? m.content.map((c: any) =>
           c.type === 'text'
-         ? { text: c.text }
+        ? { text: c.text }
             : { inline_data: { mime_type: 'image/jpeg', data: c.image_url.url.split(',')[1] } }
         )
       : [{ text: m.content }]
@@ -150,7 +154,7 @@ async function tryGemini(model: string, apiKey: string, messages: any[], useTool
 
 async function tryGroq(messages: any[], hasImage: boolean, useTools: boolean) {
   const model = hasImage
- ? 'meta-llama/llama-4-scout-17b-16e-instruct'
+? 'meta-llama/llama-4-scout-17b-16e-instruct'
     : 'llama-3.3-70b-versatile';
 
   const body: any = {
@@ -190,17 +194,16 @@ export async function POST(req: Request) {
       const name = (fileData.name as string).toLowerCase();
       try {
         if (fileData.mime === "application/pdf" || name.endsWith(".pdf")) {
-          const pdfParse = (await import("pdf-parse")).default;
           const parsed = await pdfParse(buffer);
           fileText = parsed.text.slice(0, 12000);
         } else if (fileData.mime.includes("spreadsheet") || name.endsWith(".xlsx") || name.endsWith(".xls")) {
-          const XLSX = (await import("xlsx")).default;
           const wb = XLSX.read(buffer, { type: "buffer" });
           fileText = wb.SheetNames.map((n: string) => `### Hoja: ${n}\n` + XLSX.utils.sheet_to_csv(wb.Sheets[n])).join("\n\n").slice(0, 12000);
         } else if (fileData.mime.includes("word") || name.endsWith(".docx")) {
-          const mammoth = (await import("mammoth")).default;
           const result = await mammoth.extractRawText({ buffer });
           fileText = result.value.slice(0, 12000);
+        } else if (name.endsWith(".txt") || fileData.mime === "text/plain") {
+          fileText = buffer.toString('utf-8').slice(0, 12000);
         }
       } catch(e:any) {
         console.error('FILE PARSE ERROR:', e);
@@ -209,12 +212,12 @@ export async function POST(req: Request) {
     }
 
     const finalMessage = fileText
-   ? `${message || "Analiza este archivo"}\n\n--- CONTENIDO DE ${fileData?.name} ---\n${fileText}`
+  ? `${message || "Analiza este archivo"}\n\n--- CONTENIDO DE ${fileData?.name} ---\n${fileText}`
       : message;
 
     const hasImage =!!imageDataUrl;
     const userContent: any = hasImage
-   ? [
+  ? [
           { type: "text", text: finalMessage || "Analiza esta imagen para e-commerce" },
           { type: "image_url", image_url: { url: imageDataUrl } }
         ]
@@ -222,9 +225,14 @@ export async function POST(req: Request) {
 
     let messages: any[] = [
       { role: "system", content: SYSTEM_PROMPT },
-   ...history.filter((m: any) => typeof m.content === "string"),
+  ...history.filter((m: any) => typeof m.content === "string"),
       { role: "user", content: userContent }
     ];
+
+    // Nuevo: Validar que haya keys antes de intentar
+    if (GEMINI_KEYS.length === 0 &&!GROQ_KEY) {
+      return NextResponse.json({ reply: "No hay API keys configuradas en Vercel. Agrega GEMINI_API_KEY_1 o GROQ_API_KEY." }, { status: 500, headers: cors });
+    }
 
     // 2. Cascada Gemini: 4 modelos x 3 keys
     for (const model of GEMINI_MODELS) {
@@ -285,7 +293,7 @@ export async function POST(req: Request) {
       }
     }
 
-    return NextResponse.json({ reply: "Todos los modelos fallaron. Verifica tus API keys en Vercel." }, { status: 500, headers: cors });
+    return NextResponse.json({ reply: "Todos los modelos fallaron. Verifica tus API keys en Vercel o intenta de nuevo." }, { status: 500, headers: cors });
 
   } catch (e: any) {
     console.error('ERROR GENERAL:', e);
