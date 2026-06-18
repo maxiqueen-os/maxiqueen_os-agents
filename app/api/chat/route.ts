@@ -126,7 +126,21 @@ function toGeminiContents(messages: any[]) {
 
 async function tryGemini(model: string, apiKey: string, messages: any[], useTools: boolean) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-  const body: any = { contents: toGeminiContents(messages) };
+  
+  // Extraemos las instrucciones del sistema para cumplir las reglas estrictas de Gemini
+  const systemMessage = messages.find(m => m.role === "system");
+  const chatMessages = messages.filter(m => m.role !== "system");
+
+  const body: any = { 
+    contents: toGeminiContents(chatMessages) 
+  };
+
+  if (systemMessage) {
+    body.system_instruction = {
+      parts: [{ text: systemMessage.content }]
+    };
+  }
+
   if (useTools) {
     body.tools = [{ function_declarations: toolDeclaration.map(t => t.function) }];
   }
@@ -145,7 +159,8 @@ async function tryGroq(messages: any[], hasImage: boolean, useTools: boolean) {
   const groqKey = process.env.GROQ_API_KEY_1 || process.env.GROQ_API_KEY;
   if (!groqKey) throw new Error("Groq_Key_Missing");
 
-  const model = hasImage ? 'meta-llama/llama-4-scout-17b-16e-instruct' : 'llama-3.3-70b-versatile';
+  // Corrección de identificador del modelo de visión oficial de Groq
+  const model = hasImage ? 'llama-3.2-11b-vision-preview' : 'llama-3.3-70b-versatile';
   const body: any = {
     model,
     messages,
@@ -179,7 +194,6 @@ export async function POST(req: Request) {
     const rawBody = await req.json();
     const { message, history = [], imageDataUrl = null, messages: frontMessages, fileData = null } = rawBody;
 
-    // INTERCEPTOR DE SEGURIDAD PARA FILEDATA (Evita respuestas vacías/rotas en Vercel Hobby)
     if (fileData && !imageDataUrl) {
       return NextResponse.json({ 
         reply: "Para analizar archivos (PDF, Excel o Word) de forma 100% gratuita, asegúrate de activar el extractor del Frontend. El chat principal solo procesa texto directo e imágenes para mantener el ecosistema optimizado.",
@@ -252,7 +266,7 @@ export async function POST(req: Request) {
 
         } catch (e: any) {
           console.log(`[FAILOVER-GEMINI] Modelo ${model} falló con llave activa:`, e.message);
-          if (e.message.includes("429")) break; // Salta de inmediato a la siguiente key libre
+          if (e.message.includes("429")) break; 
           continue; 
         }
       }
