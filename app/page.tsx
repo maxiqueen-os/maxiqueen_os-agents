@@ -5,10 +5,10 @@ type Msg = { role: "user" | "assistant"; content: string; imageUrl?: string };
 
 function cleanHistory(history: Msg[]) {
   return history
-   .filter(m =>!m.imageUrl)
-   .map(({ role, content }) => ({ role, content }))
-   .filter((m, i, arr) => i === 0 || m.content.trim()!== arr[i-1].content.trim())
-   .slice(-12);
+  .filter(m =>!m.imageUrl)
+  .map(({ role, content }) => ({ role, content }))
+  .filter((m, i, arr) => i === 0 || m.content.trim()!== arr[i-1].content.trim())
+  .slice(-12);
 }
 
 const fileToBase64 = (file: File) => new Promise<string>((res, rej) => {
@@ -45,6 +45,7 @@ export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const avatarRef = useRef<HTMLDivElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   // Voz
   const [voiceOn, setVoiceOn] = useState(true);
@@ -71,6 +72,11 @@ export default function Home() {
     u.onend = () => { setIsSpeaking(false); setAvatarState('idle'); };
     u.onerror = () => { setIsSpeaking(false); setAvatarState('idle'); };
     lastSpokenRef.current = text;
+    // Fix: Chrome bug que corta después de 15s
+    const resumeTimer = setInterval(() => {
+      if (window.speechSynthesis.speaking) window.speechSynthesis.resume();
+      else clearInterval(resumeTimer);
+    }, 14000);
     window.speechSynthesis.speak(u);
   };
 
@@ -115,6 +121,10 @@ export default function Home() {
     setIsLoading(true);
     setAvatarState('thinking');
 
+    // Nuevo: AbortController para cancelar si se demora
+    abortControllerRef.current = new AbortController();
+    const timeoutId = setTimeout(() => abortControllerRef.current?.abort(), 45000); // 45s timeout
+
     try {
       const historyForApi = cleanHistory(messages);
       const res = await fetch("/api/chat", {
@@ -126,7 +136,9 @@ export default function Home() {
           fileData: isImage? null : fileDataToSend,
           history: historyForApi
         }),
+        signal: abortControllerRef.current.signal
       });
+      clearTimeout(timeoutId);
       if (!res.ok) throw new Error(`API ${res.status}`);
       const { reply } = await res.json();
 
@@ -134,7 +146,12 @@ export default function Home() {
       if (voiceOn) speak(reply);
       else setAvatarState('idle');
     } catch (err: any) {
-      setMessages(prev => [...prev, { role: "assistant", content: `Error: ${err.message}` }]);
+      clearTimeout(timeoutId);
+      if (err.name === 'AbortError') {
+        setMessages(prev => [...prev, { role: "assistant", content: `Error: Timeout. El servidor tardó mucho. Intenta con un archivo más pequeño.` }]);
+      } else {
+        setMessages(prev => [...prev, { role: "assistant", content: `Error: ${err.message}` }]);
+      }
       setAvatarState('error');
     } finally {
       setIsLoading(false);
@@ -185,7 +202,7 @@ export default function Home() {
             key={idx}
             className={`flex flex-col max-w-[85%] p-3 rounded-xl border text-sm ${
               msg.role === "user"
-            ? "bg-purple-950/40 border-purple-500/30 self-end text-purple-100"
+           ? "bg-purple-950/40 border-purple-500/30 self-end text-purple-100"
                 : "bg-zinc-900/60 border-zinc-800 self-start text-zinc-200"
             }`}
           >
@@ -233,7 +250,7 @@ export default function Home() {
           />
           <button type="submit" disabled={isLoading || (!input.trim() &&!pendingFile)}
             className="bg-gradient-to-r from-purple-600 to-pink-600 disabled:opacity-50 text-white font-bold px-5 py-3 rounded-xl text-sm uppercase tracking-wider">
-            Enviar
+            {isLoading? "..." : "Enviar"}
           </button>
         </form>
 
