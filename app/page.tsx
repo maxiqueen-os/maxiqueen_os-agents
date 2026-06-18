@@ -5,10 +5,10 @@ type Msg = { role: "user" | "assistant"; content: string; imageUrl?: string };
 
 function cleanHistory(history: Msg[]) {
   return history
-  .filter(m =>!m.imageUrl)
-  .map(({ role, content }) => ({ role, content }))
-  .filter((m, i, arr) => i === 0 || m.content.trim()!== arr[i-1].content.trim())
-  .slice(-12);
+   .filter(m =>!m.imageUrl)
+   .map(({ role, content }) => ({ role, content }))
+   .filter((m, i, arr) => i === 0 || m.content.trim()!== arr[i-1].content.trim())
+   .slice(-12);
 }
 
 const fileToBase64 = (file: File) => new Promise<string>((res, rej) => {
@@ -44,12 +44,18 @@ export default function Home() {
   const [pendingFileData, setPendingFileData] = useState<{name:string, mime:string, dataUrl:string} | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const avatarRef = useRef<HTMLDivElement>(null);
 
   // Voz
   const [voiceOn, setVoiceOn] = useState(true);
   const [rate, setRate] = useState(1);
   const [volume, setVolume] = useState(0.9);
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const lastSpokenRef = useRef<string>("");
+
+  const setAvatarState = (state: string) => {
+    if (avatarRef.current) avatarRef.current.setAttribute('data-state', state);
+  };
 
   const speak = (text: string) => {
     if (typeof window === "undefined" ||!window.speechSynthesis) return;
@@ -61,6 +67,9 @@ export default function Home() {
     u.rate = rate;
     u.volume = volume;
     u.lang = "es-ES";
+    u.onstart = () => { setIsSpeaking(true); setAvatarState('talking'); };
+    u.onend = () => { setIsSpeaking(false); setAvatarState('idle'); };
+    u.onerror = () => { setIsSpeaking(false); setAvatarState('idle'); };
     lastSpokenRef.current = text;
     window.speechSynthesis.speak(u);
   };
@@ -104,6 +113,7 @@ export default function Home() {
     setPendingFileData(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
     setIsLoading(true);
+    setAvatarState('thinking');
 
     try {
       const historyForApi = cleanHistory(messages);
@@ -122,8 +132,10 @@ export default function Home() {
 
       setMessages(prev => [...prev, { role: "assistant", content: reply }]);
       if (voiceOn) speak(reply);
+      else setAvatarState('idle');
     } catch (err: any) {
       setMessages(prev => [...prev, { role: "assistant", content: `Error: ${err.message}` }]);
+      setAvatarState('error');
     } finally {
       setIsLoading(false);
     }
@@ -134,7 +146,11 @@ export default function Home() {
     if (last) speak(last.content);
   };
   const handleRepeat = () => { if (lastSpokenRef.current) speak(lastSpokenRef.current); };
-  const handleStop = () => { if (typeof window!== "undefined") window.speechSynthesis.cancel(); };
+  const handleStop = () => {
+    if (typeof window!== "undefined") window.speechSynthesis.cancel();
+    setIsSpeaking(false);
+    setAvatarState('idle');
+  };
 
   return (
     <main className="flex min-h-screen flex-col items-center bg-[#09090b] text-white font-sans p-4">
@@ -148,13 +164,28 @@ export default function Home() {
         <p className="text-zinc-500 text-[11px] uppercase tracking-widest mt-1">INTELIGENCIA LOCAL • ÉLITE ESTRATÉGICA</p>
       </header>
 
+      {/* CHAR DE MAXIQUEEN */}
+      <div className="z-10 flex justify-center my-4">
+        <div ref={avatarRef} className="mq-character" id="mqAvatar" data-state="idle">
+          <div className="mq-ears"><div className="ear left"></div><div className="ear right"></div></div>
+          <div className="mq-head">
+            <div className="mq-visor"></div>
+            <div className="mq-mouth"></div>
+            <div className="mq-whiskers left"><span></span><span></span></div>
+            <div className="mq-whiskers right"><span></span><span></span></div>
+          </div>
+          <div className="mq-body"></div>
+          <div className="mq-feet"><div className="foot"></div><div className="foot"></div></div>
+        </div>
+      </div>
+
       <section className="z-10 flex-1 w-full max-w-2xl my-4 overflow-y-auto p-4 rounded-xl border border-zinc-800 bg-black/40 backdrop-blur-md flex flex-col gap-4 max-h-[55vh]">
         {messages.map((msg, idx) => (
           <div
             key={idx}
             className={`flex flex-col max-w-[85%] p-3 rounded-xl border text-sm ${
               msg.role === "user"
-             ? "bg-purple-950/40 border-purple-500/30 self-end text-purple-100"
+            ? "bg-purple-950/40 border-purple-500/30 self-end text-purple-100"
                 : "bg-zinc-900/60 border-zinc-800 self-start text-zinc-200"
             }`}
           >
@@ -162,7 +193,7 @@ export default function Home() {
               {msg.role === "user"? "Tú" : "MaxiQueen AI"}
             </span>
             {msg.imageUrl && (
-              <img src={msg.imageUrl} className="rounded-lg mb-2 max-h-48 object-contain border border-zinc-700" />
+              <img src={msg.imageUrl} className="rounded-lg mb-2 max-h-48 object-contain border border-zinc-700" alt="adjunto" />
             )}
             <p className="whitespace-pre-wrap leading-relaxed">{msg.content}</p>
           </div>
@@ -177,7 +208,7 @@ export default function Home() {
         {(pendingFile || pendingImage) && (
           <div className="text-xs text-zinc-400 bg-zinc-900/60 border border-zinc-800 rounded-lg px-3 py-2 flex justify-between items-center gap-3">
             <div className="flex items-center gap-2">
-              {pendingImage && <img src={pendingImage} className="h-10 rounded border border-zinc-700" />}
+              {pendingImage && <img src={pendingImage} className="h-10 rounded border border-zinc-700" alt="preview" />}
               <span>📎 {pendingFile?.name} – {pendingFile? (pendingFile.size/1024/1024).toFixed(2) : ""} MB</span>
             </div>
             <button onClick={() => { setPendingFile(null); setPendingImage(null); setPendingFileData(null); if(fileInputRef.current) fileInputRef.current.value = ""; }} className="text-zinc-500 hover:text-white">✕</button>
