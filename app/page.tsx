@@ -5,16 +5,11 @@ type Msg = { role: "user" | "assistant"; content: string; imageUrl?: string };
 
 function cleanHistory(history: Msg[]) {
   return history
-  .filter(m =>!m.imageUrl)
-  .map(({ role, content }) => ({ role, content }))
-  .filter((m, i, arr) => i === 0 || m.content.trim()!== arr[i-1].content.trim())
-  .slice(-12);
+    .filter(m => !m.imageUrl)
+    .map(({ role, content }) => ({ role, content }))
+    .filter((m, i, arr) => i === 0 || m.content.trim() !== arr[i-1].content.trim())
+    .slice(-12);
 }
-
-const fileToBase64 = (file: File) => new Promise<string>((res, rej) => {
-  const r = new FileReader(); r.onload = () => res(r.result as string);
-  r.onerror = rej; r.readAsDataURL(file);
-});
 
 async function fileToImageDataUrl(file: File): Promise<string> {
   const img = new Image();
@@ -41,7 +36,6 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [pendingImage, setPendingImage] = useState<string | null>(null);
-  const [pendingFileData, setPendingFileData] = useState<{name:string, mime:string, dataUrl:string} | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const avatarRef = useRef<HTMLDivElement>(null);
@@ -59,7 +53,7 @@ export default function Home() {
   };
 
   const speak = (text: string) => {
-    if (typeof window === "undefined" ||!window.speechSynthesis) return;
+    if (typeof window === "undefined" || !window.speechSynthesis) return;
     window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
     const voices = window.speechSynthesis.getVoices();
@@ -72,7 +66,7 @@ export default function Home() {
     u.onend = () => { setIsSpeaking(false); setAvatarState('idle'); };
     u.onerror = () => { setIsSpeaking(false); setAvatarState('idle'); };
     lastSpokenRef.current = text;
-    // Fix: Chrome bug que corta después de 15s
+    
     const resumeTimer = setInterval(() => {
       if (window.speechSynthesis.speaking) window.speechSynthesis.resume();
       else clearInterval(resumeTimer);
@@ -80,7 +74,7 @@ export default function Home() {
     window.speechSynthesis.speak(u);
   };
 
-  useEffect(() => { if (typeof window!== "undefined") window.speechSynthesis.getVoices(); }, []);
+  useEffect(() => { if (typeof window !== "undefined") window.speechSynthesis.getVoices(); }, []);
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -90,56 +84,84 @@ export default function Home() {
     setPendingFile(f);
     if (f.type.startsWith("image/")) {
       setPendingImage(await fileToImageDataUrl(f));
-      setPendingFileData(null);
     } else {
       setPendingImage(null);
-      setPendingFileData({ name: f.name, mime: f.type, dataUrl: await fileToBase64(f) });
     }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if ((!input.trim() &&!pendingFile) || isLoading) return;
+    if ((!input.trim() && !pendingFile) || isLoading) return;
 
     const userText = input.trim();
-    const isImage = pendingImage!== null;
+    const isImage = pendingImage !== null;
+    const fileToProcess = pendingFile;
 
+    // Mensaje estético para la interfaz de usuario
     const userMsg: Msg = {
       role: "user",
-      content: userText || (isImage? "Analiza esta imagen" : "Analiza este archivo"),
+      content: userText || (isImage ? "Analiza esta imagen" : `Analiza el documento: ${fileToProcess?.name}`),
       imageUrl: pendingImage || undefined
     };
 
-    const newMessages = [...messages, userMsg];
-    setMessages(newMessages);
+    setMessages(prev => [...prev, userMsg]);
     setInput("");
     setPendingFile(null);
     setPendingImage(null);
-    const fileDataToSend = pendingFileData;
-    setPendingFileData(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
+    
     setIsLoading(true);
     setAvatarState('thinking');
 
-    // Nuevo: AbortController para cancelar si se demora
     abortControllerRef.current = new AbortController();
-    const timeoutId = setTimeout(() => abortControllerRef.current?.abort(), 45000); // 45s timeout
+    const timeoutId = setTimeout(() => abortControllerRef.current?.abort(), 45000);
 
     try {
+      let extractedText = "";
+
+      // Si es un documento binario, primero extraemos el contenido mediante la API dedicada
+      if (fileToProcess && !fileToProcess.type.startsWith("image/")) {
+        const uploadFormData = new FormData();
+        uploadFormData.append("file", fileToProcess);
+
+        const uploadRes = await fetch("/api/upload", {
+          method: "POST",
+          body: uploadFormData,
+          signal: abortControllerRef.current.signal
+        });
+
+        if (!uploadRes.ok) {
+          const errData = await uploadRes.json().catch(() => ({}));
+          throw new Error(errData.error || `Error del extractor (${uploadRes.status})`);
+        }
+
+        const uploadJson = await uploadRes.json();
+        if (uploadJson.text) {
+          extractedText = uploadJson.text;
+        }
+      }
+
+      // Preparamos el contenido final que va hacia la IA del chat
+      let promptFinal = userText;
+      if (extractedText) {
+        promptFinal = `[Documento adjunto: ${fileToProcess?.name}]\n\nContenido extraído del archivo:\n${extractedText}\n\nInstrucción del usuario: ${userText || "Analiza la información provista."}`;
+      }
+
       const historyForApi = cleanHistory(messages);
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          message: userMsg.content,
+          message: promptFinal,
           imageDataUrl: userMsg.imageUrl || null,
-          fileData: isImage? null : fileDataToSend,
+          fileData: null, // Ya procesado limpiamente, evitamos el desbordamiento de carga útil
           history: historyForApi
         }),
         signal: abortControllerRef.current.signal
       });
+
       clearTimeout(timeoutId);
-      if (!res.ok) throw new Error(`API ${res.status}`);
+      if (!res.ok) throw new Error(`API Chat ${res.status}`);
       const { reply } = await res.json();
 
       setMessages(prev => [...prev, { role: "assistant", content: reply }]);
@@ -148,7 +170,7 @@ export default function Home() {
     } catch (err: any) {
       clearTimeout(timeoutId);
       if (err.name === 'AbortError') {
-        setMessages(prev => [...prev, { role: "assistant", content: `Error: Timeout. El servidor tardó mucho. Intenta con un archivo más pequeño.` }]);
+        setMessages(prev => [...prev, { role: "assistant", content: `Error: Tiempo de espera agotado. El servidor tardó demasiado en responder.` }]);
       } else {
         setMessages(prev => [...prev, { role: "assistant", content: `Error: ${err.message}` }]);
       }
@@ -164,7 +186,7 @@ export default function Home() {
   };
   const handleRepeat = () => { if (lastSpokenRef.current) speak(lastSpokenRef.current); };
   const handleStop = () => {
-    if (typeof window!== "undefined") window.speechSynthesis.cancel();
+    if (typeof window !== "undefined") window.speechSynthesis.cancel();
     setIsSpeaking(false);
     setAvatarState('idle');
   };
@@ -181,7 +203,6 @@ export default function Home() {
         <p className="text-zinc-500 text-[11px] uppercase tracking-widest mt-1">INTELIGENCIA LOCAL • ÉLITE ESTRATÉGICA</p>
       </header>
 
-      {/* CHAR DE MAXIQUEEN */}
       <div className="z-10 flex justify-center my-4">
         <div ref={avatarRef} className="mq-character" id="mqAvatar" data-state="idle">
           <div className="mq-ears"><div className="ear left"></div><div className="ear right"></div></div>
@@ -202,12 +223,12 @@ export default function Home() {
             key={idx}
             className={`flex flex-col max-w-[85%] p-3 rounded-xl border text-sm ${
               msg.role === "user"
-           ? "bg-purple-950/40 border-purple-500/30 self-end text-purple-100"
+                ? "bg-purple-950/40 border-purple-500/30 self-end text-purple-100"
                 : "bg-zinc-900/60 border-zinc-800 self-start text-zinc-200"
             }`}
           >
             <span className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1 font-bold">
-              {msg.role === "user"? "Tú" : "MaxiQueen AI"}
+              {msg.role === "user" ? "Tú" : "MaxiQueen AI"}
             </span>
             {msg.imageUrl && (
               <img src={msg.imageUrl} className="rounded-lg mb-2 max-h-48 object-contain border border-zinc-700" alt="adjunto" />
@@ -226,9 +247,9 @@ export default function Home() {
           <div className="text-xs text-zinc-400 bg-zinc-900/60 border border-zinc-800 rounded-lg px-3 py-2 flex justify-between items-center gap-3">
             <div className="flex items-center gap-2">
               {pendingImage && <img src={pendingImage} className="h-10 rounded border border-zinc-700" alt="preview" />}
-              <span>📎 {pendingFile?.name} – {pendingFile? (pendingFile.size/1024/1024).toFixed(2) : ""} MB</span>
+              <span>📎 {pendingFile?.name} – {pendingFile ? (pendingFile.size/1024/1024).toFixed(2) : ""} MB</span>
             </div>
-            <button onClick={() => { setPendingFile(null); setPendingImage(null); setPendingFileData(null); if(fileInputRef.current) fileInputRef.current.value = ""; }} className="text-zinc-500 hover:text-white">✕</button>
+            <button onClick={() => { setPendingFile(null); setPendingImage(null); if(fileInputRef.current) fileInputRef.current.value = ""; }} className="text-zinc-500 hover:text-white">✕</button>
           </div>
         )}
         <form onSubmit={handleSubmit} className="flex gap-2 w-full items-center">
@@ -238,7 +259,7 @@ export default function Home() {
             📎
           </button>
           <input ref={fileInputRef} type="file" className="hidden"
-            accept=".png,.jpg,.jpeg,.webp,.pdf,.doc,.docx,.xls,.xlsx"
+            accept=".png,.jpg,.jpeg,.webp,.pdf,.doc,.docx,.xls,.xlsx,.txt"
             onChange={handleFileChange} />
           <input
             type="text"
@@ -248,15 +269,15 @@ export default function Home() {
             className="flex-1 bg-zinc-900/80 border border-zinc-800 rounded-xl px-4 py-3 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-purple-500"
             disabled={isLoading}
           />
-          <button type="submit" disabled={isLoading || (!input.trim() &&!pendingFile)}
+          <button type="submit" disabled={isLoading || (!input.trim() && !pendingFile)}
             className="bg-gradient-to-r from-purple-600 to-pink-600 disabled:opacity-50 text-white font-bold px-5 py-3 rounded-xl text-sm uppercase tracking-wider">
-            {isLoading? "..." : "Enviar"}
+            {isLoading ? "..." : "Enviar"}
           </button>
         </form>
 
         <div className="flex flex-wrap items-center gap-3 text-[11px] text-zinc-400 bg-black/40 border border-zinc-800 rounded-xl px-3 py-2">
-          <button onClick={() => setVoiceOn(v =>!v)} className={voiceOn? "text-cyan-400" : ""}>
-            🔊 Voz {voiceOn? "ON" : "OFF"}
+          <button onClick={() => setVoiceOn(v => !v)} className={voiceOn ? "text-cyan-400" : ""}>
+            🔊 Voz {voiceOn ? "ON" : "OFF"}
           </button>
           <button onClick={handlePlay} className="hover:text-white">▶ Reproducir</button>
           <button onClick={handleRepeat} className="hover:text-white">🔁 Repetir</button>
@@ -269,7 +290,7 @@ export default function Home() {
           </label>
         </div>
 
-        <p className="text-[10px] text-zinc-500 text-center">Imágenes, PDF, Word, Excel • máx 10MB</p>
+        <p className="text-[10px] text-zinc-500 text-center">Imágenes, PDF, Word, Excel, TXT • máx 10MB</p>
         <p className="text-[10px] text-zinc-600 text-center">MaxiQueen OS © 2026 — Inteligencia Local — Cesar Bedoya Barragán</p>
       </footer>
     </main>
