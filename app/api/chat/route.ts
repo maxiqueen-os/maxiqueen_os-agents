@@ -1,7 +1,4 @@
-import { NextResponse } from "next/server";
-
-export const runtime = "nodejs";
-export const dynamic = 'force-dynamic';
+export const runtime = 'edge';
 
 const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -13,9 +10,6 @@ export async function OPTIONS() {
   return new Response(null, { headers: cors });
 }
 
-// =========================================================================
-// 1. CAPA DE MENSAJERÍA Y CONFIGURACIÓN (CONCIENCIA)
-// =========================================================================
 const SYSTEM_PROMPT = `Eres MaxiQueen OS, asistente de César Julio Bedoya Barragán, Cúcuta, Colombia. ORCID 0009-0004-4946-1374.
 
 MaxiQueen OS convierte ideas, historias y negocios en activos digitales rentables. JavaScript es el cuerpo, Python es la mente, tú eres la conciencia.
@@ -55,280 +49,178 @@ Reglas de respuesta:
 - Si te adjuntan un archivo, analízalo y da un informe estructurado.
 `;
 
-// =========================================================================
-// 2. CAPA DE HERRAMIENTAS (TOOL ENGINE AISLADO)
-// =========================================================================
-function calcular_margen({ items }: { items: Array<{costo: number, precio_venta: number, comision_porcentaje?: number, unidades?: number, moneda?: string}> }) {
-  const resultados = items.map(it => {
-    const unidades = it.unidades ?? 1;
-    const comision = it.comision_porcentaje ?? 0;
-    const moneda = it.moneda ?? "USD";
-    const ingreso = it.precio_venta * unidades;
-    const costo_total = it.costo * unidades;
-    const beneficio_bruto = ingreso - costo_total;
-    const comision_total = ingreso * (comision / 100);
-    const beneficio_neto = beneficio_bruto - comision_total;
-    return {
-      moneda,
-      unidades,
-      ingreso_total: +ingreso.toFixed(2),
-      beneficio_neto: +beneficio_neto.toFixed(2),
-      margen_bruto_pct: ingreso > 0 ? +((beneficio_bruto / ingreso) * 100).toFixed(2) : 0,
-      margen_neto_pct: ingreso > 0 ? +((beneficio_neto / ingreso) * 100).toFixed(2) : 0,
-    };
-  });
-  return { resultados };
-}
+const GEMINI_KEYS = [
+  process.env.GEMINI_API_KEY_1,
+  process.env.GEMINI_API_KEY_2,
+  process.env.GEMINI_API_KEY_3,
+].filter(Boolean);
 
-const toolDeclaration = [{
-  type: "function",
-  function: {
-    name: "calcular_margen",
-    description: "Calcula márgenes para uno o varios productos, con distintas monedas.",
-    parameters: {
-      type: "object",
-      properties: {
-        items: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              costo: { type: "number" },
-              precio_venta: { type: "number" },
-              comision_porcentaje: { type: "number" },
-              unidades: { type: "number" },
-              moneda: { type: "string" }
-            },
-            required: ["costo", "precio_venta"]
-          }
-        }
-      },
-      required: ["items"]
-    }
-  }
-}];
+const GEMINI_MODELS = [
+  'gemini-2.0-flash-exp', // Gemini 3 experimental
+  'gemini-1.5-pro-latest',
+  'gemini-1.5-flash-latest',
+  'gemini-pro'
+];
 
-// =========================================================================
-// 3. CONTROLADORES DE PROVEEDORES (ADAPTER PATTERN)
-// =========================================================================
+const GROQ_KEY = process.env.GROQ_API_KEY_1 || process.env.GROQ_API_KEY;
+
 function toGeminiContents(messages: any[]) {
   return messages.map((m: any) => ({
-    role: m.role === 'assistant' ? 'model' : 'user',
+    role: m.role === 'assistant'? 'model' : 'user',
     parts: Array.isArray(m.content)
-      ? m.content.map((c: any) =>
+     ? m.content.map((c: any) =>
           c.type === 'text'
-            ? { text: c.text }
+           ? { text: c.text }
             : { inline_data: { mime_type: 'image/jpeg', data: c.image_url.url.split(',')[1] } }
         )
-      : [{ text: m.content || "" }]
+      : [{ text: m.content }]
   }));
 }
 
-async function tryGemini(model: string, apiKey: string, collapsedMessages: any[], useTools: boolean) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-  
-  const body: any = { 
-    contents: toGeminiContents(collapsedMessages) 
-  };
+function toGroqMessages(messages: any[]) {
+  return messages.map((m: any) => ({
+    role: m.role,
+    content: typeof m.content === 'string'
+     ? m.content
+      : m.content.find((c: any) => c.type === 'text')?.text || 'Analiza la imagen adjunta'
+  }));
+}
 
-  body.system_instruction = {
-    parts: [{ text: SYSTEM_PROMPT }]
-  };
-
-  if (useTools) {
-    body.tools = [{ function_declarations: toolDeclaration.map(t => t.function) }];
-  }
+async function tryGemini(model: string, apiKey: string, messages: any[]) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?key=${apiKey}&alt=sse`;
 
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
+    body: JSON.stringify({ contents: toGeminiContents(messages) })
   });
 
-  if (!res.ok) throw new Error(`Gemini_Error:${res.status}`);
-  return res.json();
+  if (!res.ok) throw new Error(`Gemini ${model} ${res.status}`);
+  return res;
 }
 
-async function tryGroq(collapsedMessages: any[], hasImage: boolean, useTools: boolean) {
-  const groqKey = process.env.GROQ_API_KEY_1 || process.env.GROQ_API_KEY;
-  if (!groqKey) throw new Error("Groq_Key_Missing");
-
-  const model = hasImage ? 'llama-3.2-11b-vision-preview' : 'llama-3.3-70b-versatile';
-  
-  const finalMessages = [
-    { role: "system", content: SYSTEM_PROMPT },
-    ...collapsedMessages
-  ];
-
-  const body: any = {
-    model,
-    messages: finalMessages,
-    temperature: hasImage ? 0.4 : 0.6,
-    max_tokens: 1024,
-  };
-
-  if (!hasImage && useTools) {
-    body.tools = toolDeclaration;
-    body.tool_choice = "auto";
-  }
+async function tryGroq(messages: any[], hasVision: boolean) {
+  const model = hasVision
+   ? 'meta-llama/llama-4-scout-17b-16e-instruct'
+    : 'llama-3.3-70b-versatile';
 
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${groqKey}`,
+      'Authorization': `Bearer ${GROQ_KEY}`,
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify(body)
+    body: JSON.stringify({
+      model,
+      messages: toGroqMessages(messages),
+      stream: true,
+      temperature: hasVision? 0.4 : 0.7,
+    })
   });
 
-  if (!res.ok) throw new Error(`Groq_Error:${res.status}`);
-  return res.json();
+  if (!res.ok) throw new Error(`Groq ${res.status}`);
+  return res;
 }
 
-// =========================================================================
-// 4. ORQUESTADOR CENTRAL (ROUTER IA)
-// =========================================================================
 export async function POST(req: Request) {
   try {
-    const rawBody = await req.json();
-    const { message, history = [], imageDataUrl = null, messages: frontMessages, fileData = null } = rawBody;
+    const { messages } = await req.json();
 
-    if (fileData && !imageDataUrl) {
-      return NextResponse.json({ 
-        reply: "Usa el extractor optimizado del frontend",
-        text: "Usa el extractor optimizado del frontend",
-        response: "Usa el extractor optimizado del frontend" 
-      }, { headers: cors });
-    }
-
-    let incomingMessage = message;
-    let incomingHistory = history;
-
-    if (!incomingMessage && frontMessages && Array.isArray(frontMessages) && frontMessages.length > 0) {
-      const lastMsg = frontMessages[frontMessages.length - 1];
-      incomingMessage = lastMsg.content || lastMsg.text || "";
-      incomingHistory = frontMessages.slice(0, -1);
-    }
-
-    const finalMessage = incomingMessage || "";
-    const hasImage = !!imageDataUrl;
-    
-    const userContent: any = hasImage
-      ? [
-          { type: "text", text: finalMessage || "Analiza esta imagen" },
-          { type: "image_url", image_url: { url: imageDataUrl } }
-        ]
-      : finalMessage;
-
-    // Historial crudo inicial
-    let rawChatHistory = [
-      ...incomingHistory.filter((m: any) => m && typeof m.content === "string"),
-      { role: "user", content: userContent }
-    ];
-
-    // INTEGRIDAD: Colapsar mensajes del mismo rol seguidos para evitar el error 400 de Gemini
-    let collapsedHistory: any[] = [];
-    for (const m of rawChatHistory) {
-      if (collapsedHistory.length > 0 && collapsedHistory[collapsedHistory.length - 1].role === m.role) {
-        let last = collapsedHistory[collapsedHistory.length - 1];
-        if (typeof last.content === "string" && typeof m.content === "string") {
-          last.content += "\n" + m.content;
-        } else {
-          last.content = m.content;
+    const cleanMessages = (messages || [])
+     .filter((m: any) => m.role === 'user' || m.role === 'assistant')
+     .map((m: any) => {
+        let content = m.content;
+        if (Array.isArray(content)) {
+          content = content.filter((c: any) => c.type === 'text' || c.type === 'image_url');
         }
-      } else {
-        collapsedHistory.push({ ...m });
-      }
-    }
+        return { role: m.role, content };
+      })
+     .filter((m: any) =>
+        typeof m.content === 'string' ||
+        (Array.isArray(m.content) && m.content.length > 0)
+      );
 
-    // Asegurar que la secuencia comience siempre en 'user'
-    while (collapsedHistory.length > 0 && collapsedHistory[0].role === "assistant") {
-      collapsedHistory.shift();
-    }
-
-    if (collapsedHistory.length === 0) {
-      return NextResponse.json({ reply: "Por favor introduce un mensaje válido." }, { headers: cors });
-    }
-
-    // Pool de llaves con soporte para la variable estándar de Vercel
-    const geminiKeys = [
-      process.env.GEMINI_API_KEY, 
-      process.env.GEMINI_API_KEY_1,
-      process.env.GEMINI_API_KEY_2,
-      process.env.GEMINI_API_KEY_3,
-    ].filter(Boolean);
-
-    const geminiModels = [
-      'gemini-2.0-flash-exp',
-      'gemini-1.5-pro-latest',
-      'gemini-1.5-flash-latest',
-      'gemini-pro'
-    ];
-
-    // --- FLUJO PRINCIPAL GEMINI ---
-    for (const apiKey of geminiKeys) {
-      for (const model of geminiModels) {
-        try {
-          let data = await tryGemini(model, apiKey, collapsedHistory, !hasImage);
-          let choice = data.candidates?.[0]?.content;
-
-          if (!hasImage && choice?.parts?.[0]?.functionCall) {
-            const fc = choice.parts[0].functionCall;
-            if (fc.name === "calcular_margen") {
-              const result = calcular_margen(fc.args);
-              collapsedHistory.push({ role: "model", parts: choice.parts });
-              collapsedHistory.push({
-                role: "user",
-                parts: [{ functionResponse: { name: "calcular_margen", response: result } }]
-              });
-              data = await tryGemini(model, apiKey, collapsedHistory, false);
-              choice = data.candidates?.[0]?.content;
-            }
-          }
-
-          const reply = choice?.parts?.[0]?.text || "Sin respuesta";
-          return NextResponse.json({ reply, text: reply, response: reply }, { headers: cors });
-
-        } catch (e: any) {
-          console.log(`[FAILOVER] ${model} falló:`, e.message);
-          if (e.message.includes("429")) break; 
-          continue; 
-        }
-      }
-    }
-
-    // --- RESPALDO CON GROQ ---
-    try {
-      let data = await tryGroq(collapsedHistory, hasImage, !hasImage);
-      let choice = data.choices?.[0]?.message;
-
-      if (!hasImage && choice?.tool_calls?.length) {
-        collapsedHistory.push(choice);
-        for (const tc of choice.tool_calls) {
-          if (tc.function.name === "calcular_margen") {
-            const args = JSON.parse(tc.function.arguments || '{"items":[]}');
-            const result = calcular_margen(args);
-            collapsedHistory.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(result) });
-          }
-        }
-        data = await tryGroq(collapsedHistory, hasImage, false);
-        choice = data.choices?.[0]?.message;
-      }
-
-      const reply = choice?.content || "Sin respuesta";
-      return NextResponse.json({ reply, text: reply, response: reply }, { headers: cors });
-
-    } catch (e: any) {
-      console.log('[FALLBACK] Groq falló:', e.message);
-    }
-
-    return NextResponse.json(
-      { reply: "Todos los recursos gratuitos y llaves de respaldo se encuentran agotados actualmente." }, 
-      { status: 500, headers: cors }
+    const hasVision = cleanMessages.some((m: any) =>
+      Array.isArray(m.content) && m.content.some((c: any) => c.type === 'image_url')
     );
 
+    const messagesWithSystem = [
+      { role: 'system', content: SYSTEM_PROMPT },
+     ...cleanMessages
+    ];
+
+    // 1. Cascada Gemini: 4 modelos x 3 keys = 12 intentos
+    for (const model of GEMINI_MODELS) {
+      for (const apiKey of GEMINI_KEYS) {
+        try {
+          const geminiRes = await tryGemini(model, apiKey, messagesWithSystem);
+
+          // Convertir SSE de Gemini a formato OpenAI que usa tu frontend
+          const stream = new ReadableStream({
+            async start(controller) {
+              const reader = geminiRes.body!.getReader();
+              const decoder = new TextDecoder();
+              let buffer = '';
+
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+
+                for (const line of lines) {
+                  if (!line.startsWith('data: ')) continue;
+                  const data = line.slice(6);
+                  try {
+                    const json = JSON.parse(data);
+                    const text = json.candidates?.[0]?.content?.parts?.[0]?.text || '';
+                    if (text) {
+                      const chunk = `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`;
+                      controller.enqueue(new TextEncoder().encode(chunk));
+                    }
+                  } catch {}
+                }
+              }
+              controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+              controller.close();
+            }
+          });
+
+          return new Response(stream, {
+            headers: {
+             ...cors,
+              'Content-Type': 'text/event-stream; charset=utf-8',
+              'Cache-Control': 'no-cache',
+            }
+          });
+
+        } catch (e) {
+          console.log(`[FAIL] ${model} key ending ${apiKey.slice(-4)}:`, e);
+          continue;
+        }
+      }
+    }
+
+    // 2. Fallback Groq si todos los Gemini fallan
+    if (GROQ_KEY) {
+      try {
+        const groqRes = await tryGroq(messagesWithSystem, hasVision);
+        return new Response(groqRes.body, {
+          headers: {
+           ...cors,
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache',
+          }
+        });
+      } catch (e) {
+        console.log('[FAIL] Groq:', e);
+      }
+    }
+
+    return new Response('Todos los modelos fallaron', { status: 500, headers: cors });
+
   } catch (e: any) {
-    console.error('ERROR CRÍTICO:', e);
-    return NextResponse.json({ reply: `Error interno de MaxiQueen OS: ${e.message}` }, { status: 500, headers: cors });
+    return new Response(String(e.message || e), { status: 500, headers: cors });
   }
 }
