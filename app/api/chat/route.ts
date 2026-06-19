@@ -332,5 +332,3 @@ export async function POST(req: Request) {
     return NextResponse.json({ reply: `Error interno de MaxiQueen OS: ${e.message}` }, { status: 500, headers: cors });
   }
 }
-
-```
