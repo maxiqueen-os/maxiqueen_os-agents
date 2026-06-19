@@ -1,314 +1,394 @@
-"use client";
-import { useState, useRef, useEffect } from "react";
+'use client';
+import { useState, useEffect, useCallback, useRef } from 'react';
 
-type Msg = { role: "user" | "assistant"; content: string; imageUrl?: string };
+type Msg = {
+  role: 'user' | 'assistant';
+  content: any;
+  fileMeta?: { name: string; type: string };
+};
 
-function cleanHistory(history: Msg[]) {
-  return history
-    .filter(m => m && !m.imageUrl)
-    .map(({ role, content }) => ({ role, content: content || "" }))
-    .filter((m, i, arr) => {
-      if (i === 0) return true;
-      const currentTrim = (m.content || "").trim();
-      const prevTrim = (arr[i - 1]?.content || "").trim();
-      return currentTrim !== prevTrim;
-    })
-    .slice(-12);
-}
-
-async function fileToImageDataUrl(file: File): Promise<string> {
-  const img = new Image();
-  const url = URL.createObjectURL(file);
-  await new Promise((resolve, reject) => { 
-    img.onload = resolve; 
-    img.onerror = reject;
-    img.src = url; 
-  });
-  URL.revokeObjectURL(url);
-  const max = 1024;
-  let { width, height } = img;
-  if (width > max || height > max) {
-    const s = Math.min(max / width, max / height);
-    width *= s; 
-    height *= s;
-  }
-  const canvas = document.createElement("canvas");
-  canvas.width = width; 
-  canvas.height = height;
-  const ctx = canvas.getContext("2d");
-  if (ctx) {
-    ctx.drawImage(img, 0, 0, width, height);
-  }
-  return canvas.toDataURL("image/jpeg", 0.85);
-}
-
-export default function Home() {
+export default function ChatPage() {
   const [messages, setMessages] = useState<Msg[]>([
-    { role: "assistant", content: "Soy MaxiQueen OS, inteligencia local. ¿En qué te ayudo hoy? Puedes adjuntar imágenes, PDF, Word o Excel." }
+    { role: 'assistant', content: 'Soy MaxiQueen OS, inteligencia local. ¿En qué te ayudo hoy? Puedes adjuntar imágenes, PDF, Word o Excel.' }
   ]);
-  const [input, setInput] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
-  const [pendingFile, setPendingFile] = useState<File | null>(null);
-  const [pendingImage, setPendingImage] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const avatarRef = useRef<HTMLDivElement>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
-
-  // Voz
-  const [voiceOn, setVoiceOn] = useState(true);
-  const [rate, setRate] = useState(1);
-  const [volume, setVolume] = useState(0.9);
+  const [input, setInput] = useState('');
+  const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const [voiceVolume, setVoiceVolume] = useState(1);
+  const [voiceRate, setVoiceRate] = useState(1);
   const [isSpeaking, setIsSpeaking] = useState(false);
-  const lastSpokenRef = useRef<string>("");
+  const [isPaused, setIsPaused] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [file, setFile] = useState<{name:string; type:string; dataUrl?:string; text?:string} | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const logRef = useRef<HTMLDivElement>(null);
+  const lastSpokenRef = useRef<string>('');
+  const avatarRef = useRef<HTMLDivElement>(null);
+
+  const synth = typeof window !== 'undefined' ? window.speechSynthesis : null;
+  const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+
+  const cleanForVoice = (text: string) =>
+    text.replace(/\*\*(.*?)\*\*/g, '$1')
+      .replace(/\*(.*?)\*/g, '$1')
+      .replace(/#{1,6}\s/g, '')
+      .replace(/[`_~>]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
 
   const setAvatarState = (state: string) => {
     if (avatarRef.current) avatarRef.current.setAttribute('data-state', state);
   };
 
-  const speak = (text: string) => {
-    if (typeof window === "undefined" || !window.speechSynthesis) return;
-    window.speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    const voices = window.speechSynthesis.getVoices();
-    const es = voices.find(v => v.lang.startsWith("es-CO")) || voices.find(v => v.lang.startsWith("es"));
-    if (es) u.voice = es;
-    u.rate = rate;
-    u.volume = volume;
-    u.lang = "es-ES";
-    u.onstart = () => { setIsSpeaking(true); setAvatarState('talking'); };
-    u.onend = () => { setIsSpeaking(false); setAvatarState('idle'); };
-    u.onerror = () => { setIsSpeaking(false); setAvatarState('idle'); };
-    lastSpokenRef.current = text;
-    
-    const resumeTimer = setInterval(() => {
-      if (window.speechSynthesis.speaking) window.speechSynthesis.resume();
-      else clearInterval(resumeTimer);
-    }, 14000);
-    window.speechSynthesis.speak(u);
-  };
+  const speak = useCallback((text: string) => {
+    if (!synth || !voiceEnabled || !text) return;
+    synth.cancel();
+    const clean = cleanForVoice(text);
+    lastSpokenRef.current = clean;
+    const u = new SpeechSynthesisUtterance(clean);
+    utteranceRef.current = u;
+    u.lang = 'es-ES';
+    u.rate = voiceRate;
+    u.volume = voiceVolume;
+    u.onstart = () => { setIsSpeaking(true); setIsPaused(false); setAvatarState('talking'); };
+    u.onend = () => { setIsSpeaking(false); setIsPaused(false); utteranceRef.current = null; setAvatarState('idle'); };
+    u.onerror = () => { setIsSpeaking(false); setIsPaused(false); utteranceRef.current = null; setAvatarState('idle'); };
+    u.onpause = () => { setIsPaused(true); setAvatarState('paused'); };
+    u.onresume = () => { setIsPaused(false); setAvatarState('talking'); };
+    synth.speak(u);
+  }, [voiceEnabled, synth, voiceRate, voiceVolume]);
 
-  useEffect(() => { if (typeof window !== "undefined") window.speechSynthesis.getVoices(); }, []);
-  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
-
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0]; if (!f) return;
-    if (f.size > 10 * 1024 * 1024) { alert("Máx 10MB"); e.target.value = ""; return; }
-
-    setPendingFile(f);
-    if (f.type.startsWith("image/")) {
-      try {
-        setPendingImage(await fileToImageDataUrl(f));
-      } catch (err) {
-        console.error("Error procesando imagen:", err);
-        setPendingImage(null);
-      }
-    } else {
-      setPendingImage(null);
-    }
-  };
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if ((!input.trim() && !pendingFile) || isLoading) return;
-
-    const userText = input.trim();
-    const isImage = pendingImage !== null;
-    const fileToProcess = pendingFile;
-
-    const userMsg: Msg = {
-      role: "user",
-      content: userText || (isImage ? "Analiza esta imagen" : `Analiza el documento: ${fileToProcess?.name}`),
-      imageUrl: pendingImage || undefined
-    };
-
-    setMessages(prev => [...prev, userMsg]);
-    setInput("");
-    setPendingFile(null);
-    setPendingImage(null);
-    if (fileInputRef.current) fileInputRef.current.value = "";
-    
-    setIsLoading(true);
-    setAvatarState('thinking');
-
-    abortControllerRef.current = new AbortController();
-    const timeoutId = setTimeout(() => abortControllerRef.current?.abort(), 45000);
-
-    try {
-      let extractedText = "";
-
-      if (fileToProcess && !fileToProcess.type.startsWith("image/")) {
-        const uploadFormData = new FormData();
-        uploadFormData.append("file", fileToProcess);
-
-        const uploadRes = await fetch("/api/upload", {
-          method: "POST",
-          body: uploadFormData,
-          signal: abortControllerRef.current.signal
-        });
-
-        if (!uploadRes.ok) {
-          const errData = await uploadRes.json().catch(() => ({}));
-          throw new Error(errData.error || `Error del extractor (${uploadRes.status})`);
-        }
-
-        const uploadJson = await uploadRes.json();
-        if (uploadJson.text) {
-          extractedText = uploadJson.text;
-        }
-      }
-
-      let promptFinal = userText;
-      if (extractedText) {
-        promptFinal = `[Documento adjunto: ${fileToProcess?.name}]\n\nContenido extraído del archivo:\n${extractedText}\n\nInstrucción del usuario: ${userText || "Analiza la información provista."}`;
-      }
-
-      const historyForApi = cleanHistory(messages);
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: promptFinal,
-          imageDataUrl: userMsg.imageUrl || null,
-          fileData: null,
-          history: historyForApi
-        }),
-        signal: abortControllerRef.current.signal
-      });
-
-      clearTimeout(timeoutId);
-      if (!res.ok) throw new Error(`API Chat ${res.status}`);
-      const { reply } = await res.json();
-
-      setMessages(prev => [...prev, { role: "assistant", content: reply }]);
-      if (voiceOn) speak(reply);
-      else setAvatarState('idle');
-    } catch (err: any) {
-      clearTimeout(timeoutId);
-      if (err.name === 'AbortError') {
-        setMessages(prev => [...prev, { role: "assistant", content: `Error: Tiempo de espera agotado. El servidor tardó demasiado en responder.` }]);
-      } else {
-        setMessages(prev => [...prev, { role: "assistant", content: `Error: ${err.message}` }]);
-      }
-      setAvatarState('error');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handlePlay = () => {
-    const last = [...messages].reverse().find(m => m.role === "assistant");
-    if (last) speak(last.content);
-  };
-  const handleRepeat = () => { if (lastSpokenRef.current) speak(lastSpokenRef.current); };
-  const handleStop = () => {
-    if (typeof window !== "undefined") window.speechSynthesis.cancel();
-    setIsSpeaking(false);
+  const toggleVoice = () => { 
+    if (voiceEnabled && synth) synth.cancel();
+    setVoiceEnabled(!voiceEnabled);
+    setIsSpeaking(false); setIsPaused(false);
     setAvatarState('idle');
   };
 
+  const pauseResumeVoice = () => {
+    if (!synth) return;
+    if (synth.speaking && !synth.paused) {
+      synth.pause();
+      setTimeout(() => {
+        if (synth.speaking && !synth.paused) synth.pause();
+      }, 50);
+      return;
+    }
+    if (synth.paused) {
+      synth.resume();
+      return;
+    }
+    if (lastSpokenRef.current && !isSpeaking) {
+      speak(lastSpokenRef.current);
+    }
+  };
+
+  const replayVoice = () => {
+    if (lastSpokenRef.current) speak(lastSpokenRef.current);
+  };
+
+  const stopVoice = () => {
+    if (synth) synth.cancel();
+    setIsSpeaking(false); setIsPaused(false);
+    utteranceRef.current = null;
+    setAvatarState('idle');
+  };
+
+  // carga parsers
+  useEffect(() => {
+    const load = (src: string) => new Promise<void>(res => { const s = document.createElement('script'); s.src = src; s.onload = () => res(); s.onerror = () => res(); document.head.appendChild(s); });
+    (async () => {
+      // @ts-ignore
+      if (!window.mammoth) await load('https://unpkg.com/mammoth@1.8.0/mammoth.browser.min.js');
+      // @ts-ignore
+      if (!window.XLSX) await load('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js');
+      // @ts-ignore
+      if (!window.pdfjsLib) {
+        await load('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js');
+        // @ts-ignore
+        if (window.pdfjsLib) window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      }
+    })();
+  }, []);
+
+  const compressImage = (file: File): Promise<string> => new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const max = 1024;
+      let { width, height } = img;
+      if (width > max || height > max) {
+        const r = Math.min(max / width, max / height);
+        width *= r; height *= r;
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = width; canvas.height = height;
+      canvas.getContext('2d')!.drawImage(img, 0, 0, width, height);
+      resolve(canvas.toDataURL('image/jpeg', 0.8));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(); };
+    img.src = url;
+  });
+
+  const handleFile = async (f: File) => {
+    if (f.size > 10 * 1024 * 1024) { alert('Máximo 10MB'); return; }
+    const name = f.name; const type = f.type;
+
+    if (type.startsWith('image/')) {
+      try {
+        const dataUrl = await compressImage(f);
+        setFile({ name, type, dataUrl });
+        return;
+      } catch { alert('No pude leer la imagen'); return; }
+    }
+    if (type.startsWith('text/') || /\.(txt|csv|md|json)$/i.test(name)) {
+      const text = await f.text();
+      setFile({ name, type, text: text.slice(0, 12000) }); return;
+    }
+    if (type === 'application/pdf' || name.endsWith('.pdf')) {
+      try {
+        // @ts-ignore
+        const pdfjs = window.pdfjsLib;
+        if (pdfjs) {
+          const buf = await f.arrayBuffer();
+          const pdf = await pdfjs.getDocument({ data: buf }).promise;
+          let out = '';
+          const pages = Math.min(pdf.numPages, 10);
+          for (let i = 1; i <= pages; i++) {
+            const page = await pdf.getPage(i);
+            const tc = await page.getTextContent();
+            out += tc.items.map((it:any) => it.str).join(' ') + '\n\n';
+            if (out.length > 12000) break;
+          }
+          setFile({ name, type, text: out.slice(0, 12000) }); return;
+        }
+      } catch {}
+      setFile({ name, type, text: `PDF adjunto: ${name}. No pude extraer texto en el navegador, describe qué necesitas analizar.` });
+      return;
+    }
+    if (name.endsWith('.docx')) {
+      try {
+        // @ts-ignore
+        const mammoth = window.mammoth;
+        if (mammoth) {
+          const buf = await f.arrayBuffer();
+          const r = await mammoth.extractRawText({ arrayBuffer: buf });
+          setFile({ name, type, text: r.value.slice(0, 12000) }); return;
+        }
+      } catch {}
+    }
+    if (name.endsWith('.xlsx') || name.endsWith('.xls')) {
+      try {
+        // @ts-ignore
+        const XLSX = window.XLSX;
+        if (XLSX) {
+          const buf = await f.arrayBuffer();
+          const wb = XLSX.read(buf); let out = '';
+          wb.SheetNames.slice(0,3).forEach((n:string) => {
+            out += `\n=== ${n} ===\n` + XLSX.utils.sheet_to_csv(wb.Sheets[n]).slice(0,5000);
+          });
+          setFile({ name, type, text: out.slice(0, 12000) }); return;
+        }
+      } catch {}
+    }
+    setFile({ name, type, text: `Archivo adjunto: ${name} (${type}, ${(f.size/1024).toFixed(0)} KB)` });
+  };
+
+  const send = async () => {
+    if ((!input.trim() && !file) || loading) return;
+
+    const displayText = input || `📎 ${file?.name}`;
+    const userMsg: Msg = { role: 'user', content: displayText, fileMeta: file ? { name: file.name, type: file.type } : undefined };
+    setMessages(m => [...m, userMsg]);
+    setAvatarState('thinking');
+
+    let apiContent: any = input || `Analiza el archivo ${file?.name}`;
+    if (file?.dataUrl) {
+      apiContent = [
+        { type: 'text', text: input || `Analiza esta imagen (${file.name}).` },
+        { type: 'image_url', image_url: { url: file.dataUrl } }
+      ];
+    } else if (file?.text) {
+      apiContent = `Archivo: ${file.name}\n\n${file.text}\n\nInstrucción: ${input || 'Genera un informe estructurado.'}`;
+    }
+
+    const apiMessages = [...messages, { role: 'user', content: apiContent }]
+     .map(m => ({ role: m.role, content: m.content }));
+
+    setInput(''); setFile(null); setLoading(true);
+    setMessages(m => [...m, { role: 'assistant', content: '' }]);
+
+    try {
+      const r = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: apiMessages })
+      });
+      if (!r.ok || !r.body) throw new Error(await r.text());
+
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let fullText = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() || '';
+
+        for (const part of parts) {
+          for (const line of part.split('\n')) {
+            if (!line.startsWith('data: ')) continue;
+            const data = line.slice(6).trim();
+            if (data === '[DONE]') break;
+            try {
+              const json = JSON.parse(data);
+              const delta = json.choices?.[0]?.delta?.content || '';
+              if (delta) {
+                fullText += delta;
+                setMessages(m => {
+                  const copy = [...m];
+                  copy[copy.length - 1] = { role: 'assistant', content: fullText };
+                  return copy;
+                });
+              }
+            } catch {}
+          }
+        }
+      }
+      if (fullText) speak(fullText);
+      else setAvatarState('idle');
+    } catch (e:any) {
+      setMessages(m => {
+        const copy = [...m];
+        copy[copy.length - 1] = { role: 'assistant', content: 'Error de conexión con Groq: ' + String(e.message || e) };
+        return copy;
+      });
+      setAvatarState('error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { logRef.current?.scrollTo(0, logRef.current.scrollHeight); }, [messages]);
+
+  useEffect(() => {
+    const handler = (e: MessageEvent) => {
+      if (e.data?.type === 'MQ_VOICE') {
+        if (e.data.action === 'mute') { setVoiceEnabled(false); stopVoice(); }
+        if (e.data.action === 'unmute') setVoiceEnabled(true);
+        if (e.data.action === 'pause') pauseResumeVoice();
+        if (e.data.action === 'resume') pauseResumeVoice();
+      }
+    };
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
+  }, [pauseResumeVoice, stopVoice]);
+
   return (
-    <main className="flex min-h-screen flex-col items-center bg-[#09090b] text-white font-sans p-4">
-      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-purple-950/30 via-zinc-950 to-black -z-0" />
-
-      <header className="z-10 w-full max-w-2xl text-center py-6 border-b border-purple-500/20">
-        <h1 className="text-3xl font-extrabold tracking-wider bg-clip-text text-transparent bg-gradient-to-r from-purple-400 via-pink-500 to-cyan-400">
-          MAXIQUEEN OS
-        </h1>
-        <p className="text-purple-300 text-xs uppercase tracking-widest mt-1 font-bold">ARQUITECTURA DIGITAL INCORRUPTIBLE</p>
-        <p className="text-zinc-500 text-[11px] uppercase tracking-widest mt-1">INTELIGENCIA LOCAL • ÉLITE ESTRATÉGICA</p>
-      </header>
-
-      <div className="z-10 flex justify-center my-4">
-        <div ref={avatarRef} className="mq-character" id="mqAvatar" data-state="idle">
-          <div className="mq-ears"><div className="ear left"></div><div className="ear right"></div></div>
-          <div className="mq-head">
-            <div className="mq-visor"></div>
-            <div className="mq-mouth"></div>
-            <div className="mq-whiskers left"><span></span><span></span></div>
-            <div className="mq-whiskers right"><span></span><span></span></div>
-          </div>
-          <div className="mq-body"></div>
-          <div className="mq-feet"><div className="foot"></div><div className="foot"></div></div>
+    <div style={{ minHeight: '100vh', background: '#0a0a0a', color: '#e5e5e5', fontFamily: 'system-ui, Inter, sans-serif' }}>
+      <div style={{ maxWidth: 900, margin: '0 auto', padding: '40px 20px' }}>
+        <div style={{ textAlign: 'center', marginBottom: 32 }}>
+          <h1 style={{ fontSize: 42, fontWeight: 800, letterSpacing: 2, color: '#facc15', margin: 0 }}>MAXIQUEEN OS</h1>
+          <p style={{ color: '#9ca3af', marginTop: 8 }}>ARQUITECTURA DIGITAL INCORRUPTIBLE</p>
+          <p style={{ color: '#facc15', fontSize: 12 }}>INTELIGENCIA LOCAL • ÉLITE ESTRATÉGICA</p>
         </div>
-      </div>
 
-      <section className="z-10 flex-1 w-full max-w-2xl my-4 overflow-y-auto p-4 rounded-xl border border-zinc-800 bg-black/40 backdrop-blur-md flex flex-col gap-4 max-h-[55vh]">
-        {messages.map((msg, idx) => (
-          <div
-            key={idx}
-            className={`flex flex-col max-w-[85%] p-3 rounded-xl border text-sm ${
-              msg.role === "user"
-                ? "bg-purple-950/40 border-purple-500/30 self-end text-purple-100"
-                : "bg-zinc-900/60 border-zinc-800 self-start text-zinc-200"
-            }`}
-          >
-            <span className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1 font-bold">
-              {msg.role === "user" ? "Tú" : "MaxiQueen AI"}
-            </span>
-            {msg.imageUrl && (
-              <img src={msg.imageUrl} className="rounded-lg mb-2 max-h-48 object-contain border border-zinc-700" alt="adjunto" />
-            )}
-            <p className="whitespace-pre-wrap leading-relaxed">{msg.content}</p>
-          </div>
-        ))}
-        {isLoading && (
-          <div className="text-xs text-cyan-400 animate-pulse uppercase tracking-widest self-start">Procesando datos...</div>
-        )}
-        <div ref={messagesEndRef} />
-      </section>
-
-      <footer className="z-10 w-full max-w-2xl pb-4 space-y-2">
-        {(pendingFile || pendingImage) && (
-          <div className="text-xs text-zinc-400 bg-zinc-900/60 border border-zinc-800 rounded-lg px-3 py-2 flex justify-between items-center gap-3">
-            <div className="flex items-center gap-2">
-              {pendingImage && <img src={pendingImage} className="h-10 rounded border border-zinc-700" alt="preview" />}
-              <span>📎 {pendingFile?.name} – {pendingFile ? (pendingFile.size/1024/1024).toFixed(2) : ""} MB</span>
+        {/* CHAR DE MAXIQUEEN */}
+        <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 24 }}>
+          <div ref={avatarRef} className="mq-character" id="mqAvatar" data-state="idle">
+            <div className="mq-ears"><div className="ear left"></div><div className="ear right"></div></div>
+            <div className="mq-head">
+              <div className="mq-visor"></div>
+              <div className="mq-mouth"></div>
+              <div className="mq-whiskers left"><span></span><span></span></div>
+              <div className="mq-whiskers right"><span></span><span></span></div>
             </div>
-            <button type="button" onClick={() => { setPendingFile(null); setPendingImage(null); if(fileInputRef.current) fileInputRef.current.value = ""; }} className="text-zinc-500 hover:text-white">✕</button>
+            <div className="mq-body"></div>
+            <div className="mq-feet"><div className="foot"></div><div className="foot"></div></div>
           </div>
-        )}
-        <form onSubmit={handleSubmit} className="flex gap-2 w-full items-center">
-          <button type="button" onClick={() => fileInputRef.current?.click()}
-            className="bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-3 text-sm hover:border-purple-500"
-            title="Adjuntar archivo">
-            📎
-          </button>
-          <input ref={fileInputRef} type="file" className="hidden"
-            accept=".png,.jpg,.jpeg,.webp,.pdf,.doc,.docx,.xls,.xlsx,.txt"
-            onChange={handleFileChange} />
-          <input
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Escribe o adjunta un archivo..."
-            className="flex-1 bg-zinc-900/80 border border-zinc-800 rounded-xl px-4 py-3 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-purple-500"
-            disabled={isLoading}
-          />
-          <button type="submit" disabled={isLoading || (!input.trim() && !pendingFile)}
-            className="bg-gradient-to-r from-purple-600 to-pink-600 disabled:opacity-50 text-white font-bold px-5 py-3 rounded-xl text-sm uppercase tracking-wider">
-            {isLoading ? "..." : "Enviar"}
-          </button>
-        </form>
-
-        <div className="flex flex-wrap items-center gap-3 text-[11px] text-zinc-400 bg-black/40 border border-zinc-800 rounded-xl px-3 py-2">
-          <button type="button" onClick={() => setVoiceOn(v => !v)} className={voiceOn ? "text-cyan-400" : ""}>
-            🔊 Voz {voiceOn ? "ON" : "OFF"}
-          </button>
-          <button type="button" onClick={handlePlay} className="hover:text-white">▶ Reproducir</button>
-          <button type="button" onClick={handleRepeat} className="hover:text-white">🔁 Repetir</button>
-          <button type="button" onClick={handleStop} className="hover:text-white">⏹ Detener</button>
-          <label className="flex items-center gap-1">Vol
-            <input type="range" min="0" max="1" step="0.1" value={volume} onChange={e => setVolume(parseFloat(e.target.value))} className="w-16 accent-purple-500" />
-          </label>
-          <label className="flex items-center gap-1">Vel
-            <input type="range" min="0.7" max="1.5" step="0.1" value={rate} onChange={e => setRate(parseFloat(e.target.value))} className="w-16 accent-purple-500" />
-          </label>
         </div>
 
-        <p className="text-[10px] text-zinc-500 text-center">Imágenes, PDF, Word, Excel, TXT • máx 10MB</p>
-        <p className="text-[10px] text-zinc-600 text-center">MaxiQueen OS © 2026 — Inteligencia Local — Cesar Bedoya Barragán</p>
-      </footer>
-    </main>
+        <div style={{ background: '#141414', border: '1px solid #262626', borderRadius: 16, padding: 20 }}>
+          <div ref={logRef} style={{ height: 380, overflowY: 'auto', marginBottom: 16 }}>
+            {messages.map((m, i) => (
+              <div key={i} style={{ marginBottom: 14, textAlign: m.role === 'user' ? 'right' : 'left' }}>
+                <span style={{
+                  display: 'inline-block', background: m.role === 'user' ? '#facc15' : '#1f1f1f',
+                  color: m.role === 'user' ? '#0a0a0a' : '#e5e5e5',
+                  padding: '10px 14px', borderRadius: 12, maxWidth: '80%', whiteSpace: 'pre-wrap',
+                  position: 'relative'
+                }}>
+                  {typeof m.content === 'string' ? m.content : '[Imagen]'}
+                  {m.fileMeta && <div style={{ fontSize: 11, opacity: 0.7, marginTop: 4 }}>📎 {m.fileMeta.name}</div>}
+                  {m.role === 'assistant' && typeof m.content === 'string' && m.content && (
+                    <button 
+                      onClick={() => speak(m.content)}
+                      title="Reproducir este mensaje"
+                      style={{ 
+                        background: 'transparent', border: 'none', color: '#facc15', 
+                        cursor: 'pointer', fontSize: 12, marginLeft: 8, opacity: 0.7 
+                      }}
+                    >🔊</button>
+                  )}
+                </span>
+              </div>
+            ))}
+            {loading && <p style={{ color: '#9ca3af' }}>MaxiQueen está analizando…</p>}
+          </div>
+
+          {file && (
+            <div style={{ background: '#0a0a0a', border: '1px solid #333', borderRadius: 8, padding: '8px 12px', marginBottom: 8, fontSize: 13, display: 'flex', justifyContent: 'space-between' }}>
+              <span>📎 {file.name}</span>
+              <button onClick={() => setFile(null)} style={{ background: 'none', border: 'none', color: '#f87171', cursor: 'pointer' }}>✕</button>
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input type="file" ref={fileRef} hidden accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.csv,.md,.json"
+              onChange={e => e.target.files?.[0] && handleFile(e.target.files[0])} />
+            <button onClick={() => fileRef.current?.click()}
+              style={{ background: '#1f1f1f', color: '#e5e5e5', border: '1px solid #333', borderRadius: 10, padding: '12px 14px', cursor: 'pointer' }}>📎</button>
+            <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), send())}
+              placeholder="Escribe o adjunta un archivo..."
+              style={{ flex: 1, background: '#0a0a0a', color: '#fff', border: '1px solid #333', borderRadius: 10, padding: '12px 14px', outline: 'none' }} />
+            <button onClick={send} disabled={loading}
+              style={{ background: '#facc15', color: '#0a0a0a', border: 'none', borderRadius: 10, padding: '12px 20px', fontWeight: 700, cursor: 'pointer', opacity: loading ? 0.6 : 1 }}>
+              Enviar
+            </button>
+          </div>
+
+          <div style={{ display: 'flex', gap: 12, marginTop: 14, fontSize: 13, color: '#9ca3af', flexWrap: 'wrap', alignItems: 'center' }}>
+            <button onClick={toggleVoice} style={{ background: 'transparent', color: '#facc15', border: '1px solid #333', borderRadius: 8, padding: '6px 12px', cursor: 'pointer' }}>
+              {voiceEnabled ? '🔊 Voz ON' : '🔇 Voz OFF'}
+            </button>
+            <button onClick={pauseResumeVoice} style={{ background: 'transparent', color: '#9ca3af', border: '1px solid #333', borderRadius: 8, padding: '6px 12px', cursor: 'pointer' }}>
+              {isSpeaking && !isPaused ? '⏸ Pausar' : '▶ Reproducir'}
+            </button>
+            <button onClick={replayVoice} style={{ background: 'transparent', color: '#9ca3af', border: '1px solid #333', borderRadius: 8, padding: '6px 12px', cursor: 'pointer' }}>
+              🔁 Repetir
+            </button>
+            <button onClick={stopVoice} style={{ background: 'transparent', color: '#9ca3af', border: '1px solid #333', borderRadius: 8, padding: '6px 12px', cursor: 'pointer' }}>
+              ⏹ Detener
+            </button>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              Vol
+              <input type="range" min="0" max="1" step="0.05" value={voiceVolume} onChange={e => setVoiceVolume(parseFloat(e.target.value))} style={{ width: 80 }} />
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              Vel
+              <input type="range" min="0.5" max="2" step="0.1" value={voiceRate} onChange={e => setVoiceRate(parseFloat(e.target.value))} style={{ width: 80 }} />
+            </label>
+            <span>Imágenes, PDF, Word, Excel • máx 10MB</span>
+          </div>
+        </div>
+        <p style={{ textAlign: 'center', color: '#555', fontSize: 12, marginTop: 24 }}>
+          MaxiQueen OS © 2026 — Inteligencia Local — Cesar Bedoya Barragán
+        </p>
+      </div>
+    </div>
   );
 }
