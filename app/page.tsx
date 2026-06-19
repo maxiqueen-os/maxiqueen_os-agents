@@ -5,26 +5,40 @@ type Msg = { role: "user" | "assistant"; content: string; imageUrl?: string };
 
 function cleanHistory(history: Msg[]) {
   return history
-    .filter(m => !m.imageUrl)
-    .map(({ role, content }) => ({ role, content }))
-    .filter((m, i, arr) => i === 0 || m.content.trim() !== arr[i-1].content.trim())
+    .filter(m => m && !m.imageUrl)
+    .map(({ role, content }) => ({ role, content: content || "" }))
+    .filter((m, i, arr) => {
+      if (i === 0) return true;
+      const currentTrim = (m.content || "").trim();
+      const prevTrim = (arr[i - 1]?.content || "").trim();
+      return currentTrim !== prevTrim;
+    })
     .slice(-12);
 }
 
 async function fileToImageDataUrl(file: File): Promise<string> {
   const img = new Image();
   const url = URL.createObjectURL(file);
-  await new Promise(r => { img.onload = r; img.src = url });
+  await new Promise((resolve, reject) => { 
+    img.onload = resolve; 
+    img.onerror = reject;
+    img.src = url; 
+  });
   URL.revokeObjectURL(url);
   const max = 1024;
   let { width, height } = img;
   if (width > max || height > max) {
     const s = Math.min(max / width, max / height);
-    width *= s; height *= s;
+    width *= s; 
+    height *= s;
   }
   const canvas = document.createElement("canvas");
-  canvas.width = width; canvas.height = height;
-  canvas.getContext("2d")!.drawImage(img, 0, 0, width, height);
+  canvas.width = width; 
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (ctx) {
+    ctx.drawImage(img, 0, 0, width, height);
+  }
   return canvas.toDataURL("image/jpeg", 0.85);
 }
 
@@ -83,7 +97,12 @@ export default function Home() {
 
     setPendingFile(f);
     if (f.type.startsWith("image/")) {
-      setPendingImage(await fileToImageDataUrl(f));
+      try {
+        setPendingImage(await fileToImageDataUrl(f));
+      } catch (err) {
+        console.error("Error procesando imagen:", err);
+        setPendingImage(null);
+      }
     } else {
       setPendingImage(null);
     }
@@ -97,7 +116,6 @@ export default function Home() {
     const isImage = pendingImage !== null;
     const fileToProcess = pendingFile;
 
-    // Mensaje estético para la interfaz de usuario
     const userMsg: Msg = {
       role: "user",
       content: userText || (isImage ? "Analiza esta imagen" : `Analiza el documento: ${fileToProcess?.name}`),
@@ -119,7 +137,6 @@ export default function Home() {
     try {
       let extractedText = "";
 
-      // Si es un documento binario, primero extraemos el contenido mediante la API dedicada
       if (fileToProcess && !fileToProcess.type.startsWith("image/")) {
         const uploadFormData = new FormData();
         uploadFormData.append("file", fileToProcess);
@@ -141,7 +158,6 @@ export default function Home() {
         }
       }
 
-      // Preparamos el contenido final que va hacia la IA del chat
       let promptFinal = userText;
       if (extractedText) {
         promptFinal = `[Documento adjunto: ${fileToProcess?.name}]\n\nContenido extraído del archivo:\n${extractedText}\n\nInstrucción del usuario: ${userText || "Analiza la información provista."}`;
@@ -154,7 +170,7 @@ export default function Home() {
         body: JSON.stringify({
           message: promptFinal,
           imageDataUrl: userMsg.imageUrl || null,
-          fileData: null, // Ya procesado limpiamente, evitamos el desbordamiento de carga útil
+          fileData: null,
           history: historyForApi
         }),
         signal: abortControllerRef.current.signal
@@ -249,7 +265,7 @@ export default function Home() {
               {pendingImage && <img src={pendingImage} className="h-10 rounded border border-zinc-700" alt="preview" />}
               <span>📎 {pendingFile?.name} – {pendingFile ? (pendingFile.size/1024/1024).toFixed(2) : ""} MB</span>
             </div>
-            <button onClick={() => { setPendingFile(null); setPendingImage(null); if(fileInputRef.current) fileInputRef.current.value = ""; }} className="text-zinc-500 hover:text-white">✕</button>
+            <button type="button" onClick={() => { setPendingFile(null); setPendingImage(null); if(fileInputRef.current) fileInputRef.current.value = ""; }} className="text-zinc-500 hover:text-white">✕</button>
           </div>
         )}
         <form onSubmit={handleSubmit} className="flex gap-2 w-full items-center">
@@ -276,12 +292,12 @@ export default function Home() {
         </form>
 
         <div className="flex flex-wrap items-center gap-3 text-[11px] text-zinc-400 bg-black/40 border border-zinc-800 rounded-xl px-3 py-2">
-          <button onClick={() => setVoiceOn(v => !v)} className={voiceOn ? "text-cyan-400" : ""}>
+          <button type="button" onClick={() => setVoiceOn(v => !v)} className={voiceOn ? "text-cyan-400" : ""}>
             🔊 Voz {voiceOn ? "ON" : "OFF"}
           </button>
-          <button onClick={handlePlay} className="hover:text-white">▶ Reproducir</button>
-          <button onClick={handleRepeat} className="hover:text-white">🔁 Repetir</button>
-          <button onClick={handleStop} className="hover:text-white">⏹ Detener</button>
+          <button type="button" onClick={handlePlay} className="hover:text-white">▶ Reproducir</button>
+          <button type="button" onClick={handleRepeat} className="hover:text-white">🔁 Repetir</button>
+          <button type="button" onClick={handleStop} className="hover:text-white">⏹ Detener</button>
           <label className="flex items-center gap-1">Vol
             <input type="range" min="0" max="1" step="0.1" value={volume} onChange={e => setVolume(parseFloat(e.target.value))} className="w-16 accent-purple-500" />
           </label>
