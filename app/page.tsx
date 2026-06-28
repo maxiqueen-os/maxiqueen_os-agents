@@ -292,8 +292,8 @@ export default function ChatPage() {
     <div style={{ minHeight: '100vh', background: '#0a0a0a', color: '#e5e5e5', fontFamily: 'system-ui, Inter, sans-serif' }}>
       <div style={{ maxWidth: 900, margin: '0 auto', padding: '40px 20px' }}>
         <div style={{ textAlign: 'center', marginBottom: 32 }}>
-          <h1 style={{ fontSize: 42, fontWeight: 800, letterSpacing: 2, color: '#facc15', margin: 0 }}>MAXIQUEEN OS</h1>
-          <p style={{ color: '#9ca3af', marginTop: 8 }}>Consultoría de Negocios</p>
+          <h1 style={{ fontSize: 42, fontWeight: 800, letterSpacing: 2, color: '#facc15', margin: 0 }}>CONSULTORIA DE NEGOCIOS</h1>
+          <p style={{ color: '#9ca3af', marginTop: 8 }}>MAXIQUEEN OS</p>
           <p style={{ color: '#facc15', fontSize: 12 }}>INTELIGENCIA LOCAL • ÉLITE ESTRATÉGICA</p>
         </div>
 
