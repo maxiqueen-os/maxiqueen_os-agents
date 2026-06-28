@@ -1,4 +1,6 @@
-export const runtime = 'nodejs'; // Cambiado a nodejs para soportar la cascada estable de fetch y flujos de datos
+import { NextRequest, NextResponse } from "next/server";
+
+export const runtime = 'nodejs'; 
 export const dynamic = 'force-dynamic';
 
 const cors = {
@@ -73,7 +75,6 @@ function toGeminiContents(messages: any[]) {
           if (c.type === 'text') {
             return { text: c.text };
           } else {
-            // Validación segura de Base64 para evitar enviar data inválida a Gemini
             const hasComma = c.image_url?.url?.includes(',');
             const base64Data = hasComma ? c.image_url.url.split(',')[1] : c.image_url?.url || '';
             return {
@@ -84,13 +85,13 @@ function toGeminiContents(messages: any[]) {
             };
           }
         })
-      : [{ text: m.content }]
+      : [{ text: String(m.content || '') }]
   }));
 }
 
 function toGroqMessages(messages: any[]) {
   return messages.map((m: any) => ({
-    role: m.role,
+    role: m.role === 'system' ? 'system' : (m.role === 'assistant' ? 'assistant' : 'user'),
     content: typeof m.content === 'string'
       ? m.content
       : m.content.find((c: any) => c.type === 'text')?.text || 'Analiza la imagen adjunta'
@@ -135,14 +136,32 @@ async function tryGroq(messages: any[], hasVision: boolean) {
 
 export async function POST(req: Request) {
   try {
-    const { messages } = await req.json();
+    const bodyData = await req.json().catch(() => ({}));
+    const { message, imageUrlData, history, messages } = bodyData;
 
-    const cleanMessages = (messages || [])
-      .filter((m: any) => m.role === 'user' || m.role === 'assistant')
+    // Adaptabilidad total: Acepta tanto el formato "messages" como el formato "message + history" visto en las DevTools
+    let incomingMessages = Array.isArray(messages) ? [...messages] : (Array.isArray(history) ? [...history] : []);
+    
+    if (message || imageUrlData) {
+      if (imageUrlData) {
+        incomingMessages.push({
+          role: 'user',
+          content: [
+            { type: 'text', text: message || 'Analiza la imagen adjunta' },
+            { type: 'image_url', image_url: { url: imageUrlData } }
+          ]
+        });
+      } else {
+        incomingMessages.push({ role: 'user', content: message });
+      }
+    }
+
+    const cleanMessages = incomingMessages
+      .filter((m: any) => m && (m.role === 'user' || m.role === 'assistant'))
       .map((m: any) => {
         let content = m.content;
         if (Array.isArray(content)) {
-          content = content.filter((c: any) => c.type === 'text' || c.type === 'image_url');
+          content = content.filter((c: any) => c && (c.type === 'text' || c.type === 'image_url'));
         }
         return { role: m.role, content };
       })
@@ -166,34 +185,47 @@ export async function POST(req: Request) {
         try {
           const geminiRes = await tryGemini(model, apiKey, messagesWithSystem);
 
+          if (!geminiRes.body) {
+            console.log(`[FAIL] ${model} sin cuerpo de respuesta.`);
+            continue;
+          }
+
+          const reader = geminiRes.body.getReader();
+          const decoder = new TextDecoder();
+
           const stream = new ReadableStream({
             async start(controller) {
-              const reader = geminiRes.body!.getReader();
-              const decoder = new TextDecoder();
               let buffer = '';
+              try {
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  
+                  buffer += decoder.decode(value, { stream: true });
+                  const lines = buffer.split('\n');
+                  buffer = lines.pop() || '';
 
-              while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                buffer += decoder.decode(value, { stream: true });
-                const lines = buffer.split('\n');
-                buffer = lines.pop() || '';
-
-                for (const line of lines) {
-                  if (!line.startsWith('data: ')) continue;
-                  const data = line.slice(6);
-                  try {
-                    const json = JSON.parse(data);
-                    const text = json.candidates?.[0]?.content?.parts?.[0]?.text || '';
-                    if (text) {
-                      const chunk = `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`;
-                      controller.enqueue(new TextEncoder().encode(chunk));
-                    }
-                  } catch {}
+                  for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    const data = line.slice(6).trim();
+                    if (data === '[DONE]') continue;
+                    
+                    try {
+                      const json = JSON.parse(data);
+                      const text = json.candidates?.[0]?.content?.parts?.[0]?.text || '';
+                      if (text) {
+                        const chunk = `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`;
+                        controller.enqueue(new TextEncoder().encode(chunk));
+                      }
+                    } catch {}
+                  }
                 }
+                controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+              } catch (streamError) {
+                console.error("Error leyendo el stream de Gemini:", streamError);
+              } finally {
+                controller.close();
               }
-              controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
-              controller.close();
             }
           });
 
@@ -201,36 +233,40 @@ export async function POST(req: Request) {
             headers: {
               ...cors,
               'Content-Type': 'text/event-stream; charset=utf-8',
-              'Cache-Control': 'no-cache',
+              'Cache-Control': 'no-cache, no-transform',
+              'Connection': 'keep-alive',
             }
           });
 
         } catch (e) {
-          console.log(`[FAIL] ${model} con clave:`, e);
+          console.log(`[FAIL] ${model} falló la ejecución con la clave actual:`, e);
           continue;
         }
       }
     }
 
-    // 2. Fallback Groq si todos los Gemini fallan
+    // 2. Fallback Groq si todos los intentos anteriores fallan
     if (GROQ_KEY) {
       try {
         const groqRes = await tryGroq(messagesWithSystem, hasVision);
-        return new Response(groqRes.body, {
-          headers: {
-            ...cors,
-            'Content-Type': 'text/event-stream; charset=utf-8',
-            'Cache-Control': 'no-cache',
-          }
-        });
+        if (groqRes.body) {
+          return new Response(groqRes.body, {
+            headers: {
+              ...cors,
+              'Content-Type': 'text/event-stream; charset=utf-8',
+              'Cache-Control': 'no-cache, no-transform',
+            }
+          });
+        }
       } catch (e) {
-        console.log('[FAIL] Groq:', e);
+        console.log('[FAIL] Fallback de Groq también falló:', e);
       }
     }
 
-    return new Response(JSON.stringify({ error: 'Todos los modelos de IA fallaron' }), { status: 500, headers: cors });
+    return NextResponse.json({ error: 'Todos los modelos e infraestructura de IA fallaron' }, { status: 500, headers: cors });
 
   } catch (e: any) {
-    return new Response(JSON.stringify({ error: e.message || String(e) }), { status: 500, headers: cors });
+    console.error("Crash global detectado en la ruta:", e);
+    return NextResponse.json({ error: 'Error interno del servidor', details: e.message || String(e) }, { status: 500, headers: cors });
   }
 }
