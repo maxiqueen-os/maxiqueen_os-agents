@@ -53,6 +53,7 @@ Reglas de respuesta:
 `;
 
 const GEMINI_KEYS = [
+  process.env.GEMINI_API_KEY,
   process.env.GEMINI_API_KEY_1,
   process.env.GEMINI_API_KEY_2,
   process.env.GEMINI_API_KEY_3,
@@ -98,13 +99,18 @@ function toGroqMessages(messages: any[]) {
   }));
 }
 
-async function tryGemini(model: string, apiKey: string, messages: any[]) {
+async function tryGemini(model: string, apiKey: string, cleanMessages: any[]) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?key=${apiKey}&alt=sse`;
 
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contents: toGeminiContents(messages) })
+    body: JSON.stringify({ 
+      contents: toGeminiContents(cleanMessages),
+      systemInstruction: {
+        parts: [{ text: SYSTEM_PROMPT }]
+      }
+    })
   });
 
   if (!res.ok) throw new Error(`Gemini ${model} ${res.status}`);
@@ -113,7 +119,7 @@ async function tryGemini(model: string, apiKey: string, messages: any[]) {
 
 async function tryGroq(messages: any[], hasVision: boolean) {
   const model = hasVision
-    ? 'meta-llama/llama-4-scout-17b-16e-instruct'
+    ? 'llama-3.2-11b-vision-preview'
     : 'llama-3.3-70b-versatile';
 
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -139,7 +145,6 @@ export async function POST(req: Request) {
     const bodyData = await req.json().catch(() => ({}));
     const { message, imageUrlData, history, messages } = bodyData;
 
-    // Adaptabilidad total: Acepta tanto el formato "messages" como el formato "message + history" visto en las DevTools
     let incomingMessages = Array.isArray(messages) ? [...messages] : (Array.isArray(history) ? [...history] : []);
     
     if (message || imageUrlData) {
@@ -174,16 +179,16 @@ export async function POST(req: Request) {
       Array.isArray(m.content) && m.content.some((c: any) => c.type === 'image_url')
     );
 
-    const messagesWithSystem = [
+    const messagesWithSystemForGroq = [
       { role: 'system', content: SYSTEM_PROMPT },
       ...cleanMessages
     ];
 
-    // 1. Cascada Gemini: 4 modelos x 3 keys = 12 intentos
+    // 1. Cascada Gemini
     for (const model of GEMINI_MODELS) {
       for (const apiKey of GEMINI_KEYS) {
         try {
-          const geminiRes = await tryGemini(model, apiKey, messagesWithSystem);
+          const geminiRes = await tryGemini(model, apiKey, cleanMessages);
 
           if (!geminiRes.body) {
             console.log(`[FAIL] ${model} sin cuerpo de respuesta.`);
@@ -245,10 +250,10 @@ export async function POST(req: Request) {
       }
     }
 
-    // 2. Fallback Groq si todos los intentos anteriores fallan
+    // 2. Fallback Groq
     if (GROQ_KEY) {
       try {
-        const groqRes = await tryGroq(messagesWithSystem, hasVision);
+        const groqRes = await tryGroq(messagesWithSystemForGroq, hasVision);
         if (groqRes.body) {
           return new Response(groqRes.body, {
             headers: {
