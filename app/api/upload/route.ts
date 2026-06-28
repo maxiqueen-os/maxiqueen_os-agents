@@ -4,7 +4,7 @@ import * as mammoth from "mammoth";
 
 export const runtime = "nodejs";
 export const dynamic = 'force-dynamic';
-export const maxDuration = 10; // Límite de la capa Hobby de Vercel
+export const maxDuration = 10; 
 
 const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -38,11 +38,18 @@ export async function POST(req: NextRequest) {
     const name = file.name.toLowerCase();
     let text = "";
 
-    // Procesamiento seguro por extensión
     if (name.endsWith(".pdf")) {
-      const pdfParse = (await import("pdf-parse")).default;
-      const parsed = await pdfParse(buffer);
-      text = parsed.text;
+      try {
+        const pdfParse = (await import("pdf-parse")).default;
+        const parsed = await pdfParse(buffer);
+        text = parsed.text || "";
+      } catch (pdfError: any) {
+        console.error("Error específico parseando PDF:", pdfError);
+        return NextResponse.json({ 
+          error: 'Error interno al procesar el formato PDF en el servidor.',
+          details: pdfError.message 
+        }, { status: 500, headers: cors });
+      }
     } 
     else if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
       const wb = XLSX.read(buffer, { type: "buffer" });
@@ -71,7 +78,7 @@ export async function POST(req: NextRequest) {
     }, { headers: cors });
     
   } catch (e: any) {
-    console.error('Error de parseo:', e);
+    console.error('Error general de parseo:', e);
     return NextResponse.json({ 
       error: 'Error al procesar el archivo', 
       details: e.message 
